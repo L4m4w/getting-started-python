@@ -1,0 +1,8 @@
+"DESCRIPTION","DURATION IN MS","NAME","PARENT SUITE","START TIME","STATUS","STOP TIME","SUB SUITE","SUITE","TEST CLASS","TEST METHOD"
+"","1870","Несовпадающие пароли показывают ошибку","","2026-11-08","passed","2026-11-08","TestRegistration","test_niffler_registration","",""
+"","2026","Занятое имя пользователя показывает ошибку","","2026-11-08","passed","2026-11-08","TestRegistration","test_niffler_registration","",""
+"","5898","Логин с валидными кредами","","2026-11-08","passed","2026-11-08","TestLogin","test_niffler_login","",""
+"","2057","Регистрация нового пользователя","","2026-11-08","passed","2026-11-08","TestRegistration","test_niffler_registration","",""
+"","5058","Логин с отправкой формы клавишей Enter","","2026-11-08","passed","2026-11-08","TestLogin","test_niffler_login","",""
+"","5810","Выход возвращает на форму логина","","2026-11-08","passed","2026-11-08","TestLogout","test_niffler_registration","",""
+"","2908","Логин с неверным паролем показывает ошибку","","2026-11-08","passed","2026-11-08","TestLogin","test_niffler_login","",""
