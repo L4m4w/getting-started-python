@@ -1,0 +1,57 @@
+<!DOCTYPE html><html lang="ru" xmlns="http://www.w3.org/1999/xhtml"><head>
+    <title>Login to Niffler</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <meta http-equiv="refresh" content="1740">
+    <link rel="icon" href="images/favicon.ico">
+    <link href="styles/styles.css" rel="stylesheet" type="text/css">
+</head>
+<body>
+<main class="content">
+    <div class="content__wrapper">
+        <div class="main__hero"></div>
+        <section class="main__form">
+            <div class="logo-section">
+                <img class="logo-section__logo" src="images/coin.svg" width="36" alt="Niffler logo">
+                <p class="logo-section__text">
+                    Niffler
+                </p>
+            </div>
+            <div class="form-section">
+                <form class="form" id="login-form" action="/login" method="post"><input type="hidden" name="_csrf" value="ecc8d01c-d3e7-41a1-9546-c0095b7ed9fd" style="">
+                    <h1 class="header">Log in</h1>
+                    
+                    
+                    <label class="form__label">Username
+                        <input class="form__input" type="text" name="username" id="username" placeholder="Type your username" autocomplete="false" required="" style="">
+                    </label>
+                    <label class="form__label">Password
+                        <input class="form__input" type="password" name="password" id="password" placeholder="Type your password" autocomplete="false" required="" style="">
+                        <button type="button" class="form__password-button"></button>
+                    </label>
+                    <button class="form__submit" id="login-button" type="submit">
+                        <span class="button-text">Log in</span>
+                        <span class="loader hidden"></span>
+                    </button>
+                    <button class="form__submit" id="login-with-passkey-button">
+                        <span class="button-text">Log in with passkey</span>
+                    </button>
+                    <span class="divider"></span>
+                    <a class="form__register" id="register-button" href="/register">Create new
+                        account
+                        <span class="loader hidden"></span>
+                    </a>
+                </form>
+            </div>
+        </section>
+    </div>
+</main>
+
+<script>
+    window.AUTH_BASE = "https:\/\/auth.niffler.qa.guru" || window.location.origin;
+    window.FRONT_BASE = "https:\/\/niffler.qa.guru";
+</script>
+
+<script src="/scripts/login.js" defer=""></script>
+
+
+</body></html>
