@@ -1,4 +1,4 @@
-<!DOCTYPE html><html lang="ru" xmlns="http://www.w3.org/1999/xhtml"><head>
+<html lang="ru" xmlns="http://www.w3.org/1999/xhtml"><head>
     <title>Login to Niffler</title>
     <meta name="viewport" content="width=device-width, initial-scale=1">
     <meta http-equiv="refresh" content="1740">
@@ -17,15 +17,17 @@
                 </p>
             </div>
             <div class="form-section">
-                <form class="form" id="login-form" action="/login" method="post"><input type="hidden" name="_csrf" value="ecc8d01c-d3e7-41a1-9546-c0095b7ed9fd" style="">
+                <form class="form" id="login-form" action="/login" method="post"><input type="hidden" name="_csrf" value="0984c07c-d79d-4115-939d-c8b1a39fad5b">
                     <h1 class="header">Log in</h1>
-                    
+                    <div class="form__error-container">
+                        <p class="form__error">Bad credentials</p>
+                    </div>
                     
                     <label class="form__label">Username
-                        <input class="form__input" type="text" name="username" id="username" placeholder="Type your username" autocomplete="false" required="" style="">
+                        <input class="form__input" type="text" name="username" id="username" placeholder="Type your username" autocomplete="false" required="">
                     </label>
                     <label class="form__label">Password
-                        <input class="form__input" type="password" name="password" id="password" placeholder="Type your password" autocomplete="false" required="" style="">
+                        <input class="form__input" type="password" name="password" id="password" placeholder="Type your password" autocomplete="false" required="">
                         <button type="button" class="form__password-button"></button>
                     </label>
                     <button class="form__submit" id="login-button" type="submit">
