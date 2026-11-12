@@ -1,1 +1,1 @@
-{"total":1,"items":[{"uid":"a6dd8705e2473b4177ad1e5348049dc7","name":"Niffler","statistic":{"failed":0,"broken":0,"skipped":0,"passed":3,"unknown":0,"total":3}}]}
+{"total":2,"items":[{"uid":"1cb37d6d3ed458c400750a0da007f2eb","name":"Инфраструктура","statistic":{"failed":0,"broken":0,"skipped":0,"passed":4,"unknown":0,"total":4}},{"uid":"a6dd8705e2473b4177ad1e5348049dc7","name":"Niffler","statistic":{"failed":0,"broken":0,"skipped":0,"passed":3,"unknown":0,"total":3}}]}
