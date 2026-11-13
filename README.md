@@ -4,6 +4,12 @@
 
 UI-фреймворк автотестирования для [niffler.qa.guru](https://niffler.qa.guru): Python + pytest + Selenium, Page Object, Allure-отчёты.
 
+## Планы развития
+
+- [Целевой QA workflow для Niffler](docs/plans/qa-workflow.md)
+- [План MVP QA workflow](docs/plans/qa-workflow-mvp.md)
+- [Ход работ и материалы пилота](docs/qa-workflow/README.md)
+
 ## Установка
 
 ```bash

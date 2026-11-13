@@ -66,12 +66,31 @@ Unit-тесты используют подмены драйвера и тран
 ## Результаты и коды завершения
 
 Каждый запуск через `run-tests.sh` создаёт новый каталог:
-`artifacts/harness/run-*/`, внутри `allure-results/` и `junit.xml`.
+`artifacts/harness/run-*/`, внутри `allure-results/`, `junit.xml` и `manifest.json`.
 Точный путь печатается перед pytest. Посмотреть конкретный отчёт:
 
 ```sh
 allure serve artifacts/harness/run-ИМЯ/allure-results
 ```
+
+`manifest.json` (schema_version 1) сохраняется до старта pytest и обновляется
+после завершения. Он содержит run_id, UTC started_at/finished_at, версию Python, commit и dirty
+тестового репозитория, выбранный scope/структурные node ID, CLI-параметры браузера,
+exit_code и относительные пути артефактов. Сводка `junit_summary` разделяет total,
+passed, failed, errors, skipped; отсутствующий/повреждённый JUnit даёт `null`,
+а не успешный результат. Состояние `completed` означает завершение команды,
+в том числе с ненулевым exit code. Ошибка запуска даёт `launch_error`/127,
+KeyboardInterrupt — `interrupted`/130; при принудительном убийстве процесса
+может остаться `running` с незаполненным finished_at.
+
+Manifest не включает env, remote URL, вывод тестов, содержимое diff, имена
+изменённых файлов и значения параметризации в node ID. Свободное значение
+`--bversion` сохраняется только как короткая метка из букв, цифр, `._-`;
+остальные значения заменяются на `<omitted>`. Неопределённые сведения Git —
+`null`. CLI-значения браузера не доказывают фактическую конфигурацию из env;
+commit приложения и готовность окружения этим manifest не фиксируются.
+Команды `list`, `check`, `versions` и заблокированные до старта проверки
+отдельного манифеста выполнения не создают.
 
 CI и прямые команды из README продолжают писать в `allure-results/`.
 Локальные результаты harness не подхватываются автоматически Telegram-скриптом

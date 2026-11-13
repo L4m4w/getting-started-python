@@ -1,0 +1,82 @@
+{
+  "schema_version": 1,
+  "pilot_id": "category-update-validation",
+  "captured_on": "2026-11-14",
+  "repository": "https://github.com/L4m4w/niffler-py-st3",
+  "base_sha": "36674280b6878540a9e88f40aaeedf5dfdd2e6ce",
+  "head_sha": null,
+  "change_status": "proposed_no_product_change_yet",
+  "retrieval": "explicit_files_from_git_commit",
+  "sources": [
+    {
+      "path": "niffler-gateway/src/main/java/guru/qa/niffler/controller/CategoriesController.java",
+      "purpose": "Публичный контракт: POST с @Valid, PATCH без @Valid",
+      "git_blob": "a37421691d9c34cf6528580cae6bf47fa234ea65",
+      "sha256": "8c031efc5fbc004f447d435da4089b90008490224cbe891518c854cabb250378",
+      "line_count": 63,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-gateway/src/main/java/guru/qa/niffler/controller/CategoriesController.java"
+    },
+    {
+      "path": "niffler-gateway/src/main/java/guru/qa/niffler/model/CategoryJson.java",
+      "purpose": "Ограничения имени в DTO; наблюдение кода, не самостоятельный источник требования",
+      "git_blob": "a05e61cf26fd6e0be784e9a693d1573cced22fda",
+      "sha256": "d0e0fb63fd34e6b239d0c25596ba106b712d7326aae1164bc5d7e06e5191d552",
+      "line_count": 31,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-gateway/src/main/java/guru/qa/niffler/model/CategoryJson.java"
+    },
+    {
+      "path": "niffler-gateway/src/main/java/guru/qa/niffler/service/GlobalExceptionHandler.java",
+      "purpose": "Отображение ошибок bean validation в HTTP-ответ",
+      "git_blob": "b2b6a2e796fc2ea96b222332f14b9fe1d006f2a3",
+      "sha256": "84895358ad9db3dcdbe3a955da6b713ae10ffabe72be7dfa226df13f2e0b9ede",
+      "line_count": 120,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-gateway/src/main/java/guru/qa/niffler/service/GlobalExceptionHandler.java"
+    },
+    {
+      "path": "niffler-spend/src/main/java/guru/qa/niffler/service/CategoryService.java",
+      "purpose": "Фактическая обработка обновления и дополнительные ограничения",
+      "git_blob": "1e0385b34178a1072053217b08f2f6a20efc0357",
+      "sha256": "f2e56a6ac07a68c1a34ee2e1a05df872c8215dbaf14fa9a5937b6537e5f65ba8",
+      "line_count": 108,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-spend/src/main/java/guru/qa/niffler/service/CategoryService.java"
+    },
+    {
+      "path": "niffler-spend/src/test/java/guru/qa/niffler/controller/CategoriesControllerTest.java",
+      "purpose": "Существующее покрытие списка и успешного изменения",
+      "git_blob": "b4d423db89b2f3f336d7497d3d04a966f463ba3f",
+      "sha256": "e4d2e539de94ba6fde39c89622855a8ec2f05ea91c79866e7dec4fb715d5bd2d",
+      "line_count": 72,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-spend/src/test/java/guru/qa/niffler/controller/CategoriesControllerTest.java"
+    },
+    {
+      "path": "niffler-spend/src/test/java/guru/qa/niffler/service/CategoryServiceTest.java",
+      "purpose": "Существующее покрытие service",
+      "git_blob": "e4ca2a64ddc395ec2bb61cd9aea63f92abfa5400",
+      "sha256": "80a2ea0ade155e81c589902cbbbde48b846b33ad2108c9f7aeee70f928967f48",
+      "line_count": 122,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-spend/src/test/java/guru/qa/niffler/service/CategoryServiceTest.java"
+    },
+    {
+      "path": "settings.gradle",
+      "purpose": "Состав Gradle-модулей",
+      "git_blob": "4b3f8cbfcd5b95640eb385b35d182b24ae00489a",
+      "sha256": "cd037f0e5c9e342a44cc9ec367df317cd2fbeaa624f606bf19fd19485ca2eb06",
+      "line_count": 8,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/settings.gradle"
+    },
+    {
+      "path": "niffler-spend/src/main/resources/application-test.yaml",
+      "purpose": "Изоляция service тестов через H2",
+      "git_blob": "b7726330814371aa1a2481278382545063625f79",
+      "sha256": "5bdaa6e5ba6a678eaa2e6d1e18bcbb97e43e71090e1ec8dae0b81c3148544446",
+      "line_count": 23,
+      "source_url": "https://github.com/L4m4w/niffler-py-st3/blob/36674280b6878540a9e88f40aaeedf5dfdd2e6ce/niffler-spend/src/main/resources/application-test.yaml"
+    }
+  ],
+  "limitations": [
+    "Статический контекст исходной версии; изменение приложения ещё не создано.",
+    "Код описывает фактическое поведение; ожидаемое поведение фиксируется отдельно в requirement.md.",
+    "Проверки приложения не выполнялись. Системный PATH не находит Java; обнаружен и проверен прямым вызовом Homebrew JDK 21.0.12.1 в /opt/homebrew/opt/openjdk@21; Gradle ещё не запускался.",
+    "OpenSpec, TestOps, окружение приложения и автоматический сбор MR/PR пока не подключены."
+  ]
+}

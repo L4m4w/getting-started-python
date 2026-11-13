@@ -1,7 +1,9 @@
 """Local test commands. No installs, service startup or implicit browser runs."""
 import argparse
 import compileall
+from datetime import datetime, timezone
 import importlib.metadata
+import json
 import os
 from pathlib import Path
 import re
@@ -9,6 +11,7 @@ import shlex
 import subprocess
 import sys
 import tempfile
+import xml.etree.ElementTree as ET
 
 
 ROOT = Path(__file__).resolve().parent.parent
@@ -87,6 +90,107 @@ def selection_for(options, parser):
     return ["tests"], options.scope == "all"
 
 
+def _repository_state():
+    """Read only version/state; never retain status paths or Git diagnostics."""
+    state = {"commit": None, "dirty": None}
+    for key, args in (("commit", ["rev-parse", "HEAD"]),
+                      ("dirty", ["status", "--porcelain", "--untracked-files=normal"])):
+        try:
+            result = subprocess.run(
+                ["git", "-c", "core.fsmonitor=false", *args], cwd=ROOT,
+                capture_output=True, text=True, check=False, timeout=5,
+                env={**os.environ, "GIT_OPTIONAL_LOCKS": "0"},
+            )
+        except (OSError, subprocess.TimeoutExpired):
+            continue
+        if result.returncode == 0:
+            if key == "dirty":
+                state[key] = bool(result.stdout.strip())
+            elif re.fullmatch(r"[0-9a-fA-F]{40,64}", result.stdout.strip()):
+                state[key] = result.stdout.strip()
+    return state
+
+
+def _junit_summary(path):
+    """Count testcase outcomes without copying test names, output or properties."""
+    try:
+        root = ET.parse(path).getroot()
+    except (OSError, ET.ParseError):
+        return None
+    if root.tag.rsplit("}", 1)[-1] not in ("testsuite", "testsuites"):
+        return None
+    summary = {"total": 0, "passed": 0, "failed": 0, "errors": 0, "skipped": 0}
+    for case in root.iter():
+        if case.tag.rsplit("}", 1)[-1] != "testcase":
+            continue
+        tags = {child.tag.rsplit("}", 1)[-1] for child in case}
+        outcome = ("errors" if "error" in tags else "failed" if "failure" in tags
+                   else "skipped" if "skipped" in tags else "passed")
+        summary["total"] += 1
+        summary[outcome] += 1
+    return summary
+
+
+def _write_manifest(path, manifest):
+    temporary = path.with_suffix(".tmp")
+    temporary.write_text(json.dumps(manifest, indent=2, ensure_ascii=False) + "\n",
+                         encoding="utf-8")
+    temporary.replace(path)
+
+
+def _utc_now():
+    return datetime.now(timezone.utc).isoformat()
+
+
+def run_with_evidence(selection, options):
+    """Execute one actual run and retain its outcome, including launch failures."""
+    parent = ROOT / "artifacts" / "harness"
+    parent.mkdir(parents=True, exist_ok=True)
+    evidence = Path(tempfile.mkdtemp(prefix="run-", dir=parent))
+    manifest_path = evidence / "manifest.json"
+    junit_path = evidence / "junit.xml"
+    # Parameter IDs may contain data; version is a free-form CLI value. Keep only
+    # structural node IDs and conventional version labels, never environment data.
+    version = options.bversion
+    manifest = {
+        "schema_version": 1,
+        "run_id": evidence.name,
+        "started_at": _utc_now(),
+        "finished_at": None,
+        "status": "running",
+        "python_version": sys.version.split()[0],
+        "repository": _repository_state(),
+        "selection": {"scope": options.scope,
+                      "targets": [item.split("[", 1)[0] for item in selection],
+                      "parameter_ids_omitted": any("[" in item for item in selection),
+                      "browser": options.browser,
+                      "browser_version": version if version is None or
+                      re.fullmatch(r"[A-Za-z0-9_.-]{1,64}", version) else "<omitted>"},
+        "exit_code": None,
+        "artifacts": {"allure_results": "allure-results", "junit": "junit.xml"},
+        "junit_summary": None,
+    }
+    _write_manifest(manifest_path, manifest)
+    print(f"Run evidence: {evidence}", flush=True)
+    try:
+        manifest["exit_code"] = command([
+            *pytest_command(selection, options), "-v",
+            f"--alluredir={evidence / 'allure-results'}", f"--junitxml={junit_path}",
+        ])
+        manifest["status"] = "completed"
+    except KeyboardInterrupt:
+        manifest.update(status="interrupted", exit_code=130)
+        print("Run interrupted; evidence retained.", file=sys.stderr)
+    except OSError:
+        manifest.update(status="launch_error", exit_code=127)
+        print("Unable to launch pytest; evidence retained.", file=sys.stderr)
+    finally:
+        manifest["finished_at"] = _utc_now()
+        manifest["junit_summary"] = _junit_summary(junit_path)
+        _write_manifest(manifest_path, manifest)
+    return manifest["exit_code"]
+
+
 def main():
     os.chdir(ROOT)
     parser = argparse.ArgumentParser(description=__doc__)
@@ -130,13 +234,8 @@ def main():
     args = pytest_command(selection, options)
     if options.scope == "list":
         return command([*args, "--collect-only", "-q"])
-    # A fresh directory prevents earlier Allure/JUnit results being reported as this run.
-    parent = ROOT / "artifacts" / "harness"
-    parent.mkdir(parents=True, exist_ok=True)
-    evidence = Path(tempfile.mkdtemp(prefix="run-", dir=parent))
-    print(f"Run evidence: {evidence}", flush=True)
-    return command([*args, "-v", f"--alluredir={evidence / 'allure-results'}",
-                    f"--junitxml={evidence / 'junit.xml'}"])
+    # Fresh evidence prevents earlier results being reported as this run.
+    return run_with_evidence(selection, options)
 
 
 if __name__ == "__main__":
