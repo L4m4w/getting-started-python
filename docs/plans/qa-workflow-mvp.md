@@ -8,8 +8,37 @@
 [результаты от 2026-11-14](qa-workflow-discovery.md).
 
 Текущие артефакты и ограничения: [ход работ](../qa-workflow/README.md).
-Подготовлены требование, сценарии и манифест исходного контекста; это не
-означает завершение ревью, генерации тестов или воспроизведения на приложении.
+
+Актуализация 2026-11-15: этапы 16–18 закрыты координатором.
+Согласованные шесть TestOps ID закреплены в коде, новый fix execution
+`run-ni_5bvnc` дал шесть passed и опубликован bind-пакетом в
+[launch 57317](https://allure.qa.guru/launch/57317): REST confirmed,
+persisted uploaded, attempts=1, новых кейсов нет.
+[Приёмка и ограничения](../qa-workflow/handoffs/coordination-wave-17.md).
+Предыдущие base/fix-прогоны доказали обнаружение целевого дефекта.
+
+**20/20R2 принят как минимальная offline-реализация оркестратора**:
+состояние/возобновление, строгие gates и evidence contracts, intents,
+локальная TestOps-цепочка и fake PR transport проверены локально.
+[Приёмка и пределы доказательства](../qa-workflow/handoffs/coordination-wave-22.md).
+Независимое ревью 21A/B/C и исправления 21R/21R2 приняты в offline-границах:
+[wave 26](../qa-workflow/handoffs/coordination-wave-26.md).
+Пакеты 19A2-QA/APP актуализированы и приняты:
+[wave 27](../qa-workflow/handoffs/coordination-wave-27.md).
+Следующий шаг — [22: GitHub PR transport/CLI wiring](../qa-workflow/agent-tasks/22-github-pr-transport.md):
+22A/B/AR/C приняты как весь offline-этап 22: GitHub transport и CLI
+реализованы, собственные 711 unit passed и fake repeat 31/31.
+[Wave 31](../qa-workflow/handoffs/coordination-wave-31.md).
+QA Git/PR-пакет актуализирован. Следующий шаг — отдельное разрешение
+локальных commits в изолированных worktree для immutable heads;
+push/PR/live-проверки пока не разрешены и не выполнялись.
+
+**Полный MVP не завершён:** нет draft MR/PR и immutable head SHA с
+изменениями; сквозная идемпотентность live-потока, включая будущие PR,
+не доказана; не выполнена итоговая оценка. Offline fake tests не
+заменяют реальную публикацию PR и проверку повторного входа на сервере.
+Commit/push/PR пока не разрешены. Нумерованный план ниже — критерии
+полного потока, включая Git/PR, а не номера поручений исполнителям.
 
 ## Цель и границы
 

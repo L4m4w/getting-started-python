@@ -11,7 +11,10 @@
 сценарии из `docs/qa-workflow/pilots/category-update-validation/`,
 `docs/qa-workflow/api-framework-assessment.md`, отчёты
 `docs/qa-workflow/handoffs/00-scenario-review.md` и `01-build-readiness.md`.
-До закрепления ожиданий координатор должен подтвердить решение ревью 00.
+Решение ревью зафиксировано в
+`docs/qa-workflow/handoffs/coordination-wave-1.md`; прочитай его перед работой.
+Сборка 01 готова без изменения build-файлов. Контракт реальных fixtures из 03
+не нужен для этого standalone MockMvc-теста.
 
 ## Действия
 
@@ -30,12 +33,15 @@
 `niffler-gateway/src/test/java/guru/qa/niffler/controller/CategoriesControllerValidationTest.java`.
 Дополнительные зависимости передай агенту 01 через координатора; сам не меняй
 общую сборку. Не добавляй @Valid в production-контроллер и не меняй требования.
+Не добавляй spring-security-test заранее: начни с custom Jwt resolver.
 Отчёт в тестовом проекте: `docs/qa-workflow/handoffs/04-gateway-regression.md`.
 
 ## Проверка и передача
 
 После готовности 01 и согласования очереди Gradle с координатором проверь
-компиляцию/запуск. Если команда evidence из 02 готова, используй её.
+компиляцию/запуск. Используй Java evidence harness, учитывая исправления
+координатора из coordination-wave-1.md. Проверяй свежий JUnit и число случаев:
+NO-SOURCE/exit 0, FROM-CACHE и UP-TO-DATE не являются новым фактическим прогоном.
 Падение assertions на base ожидаемо, но сбой компиляции/setup не является
 воспроизведением. Запиши по каждому случаю фактический результат.
 

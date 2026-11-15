@@ -1,0 +1,20 @@
+36674280b6878540a9e88f40aaeedf5dfdd2e6ce
+(clean)
+openjdk version "21.0.12.1" 2026-08-18
+OpenJDK Runtime Environment Homebrew (build 21.0.12.1)
+OpenJDK 64-Bit Server VM Homebrew (build 21.0.12.1, mixed mode, sharing)
+javac 21.0.12.1
+
+------------------------------------------------------------
+Gradle 8.6
+------------------------------------------------------------
+
+Build time:   2024-02-02 16:47:16 UTC
+Revision:     d55c486870a0dc6f6278f53d21381396d0741c6e
+
+Kotlin:       1.9.20
+Groovy:       3.0.17
+Ant:          Apache Ant(TM) version 1.10.13 compiled on January 4 2023
+JVM:          21.0.12.1 (Homebrew 21.0.12.1)
+OS:           Mac OS X 26.5.2 aarch64
+
