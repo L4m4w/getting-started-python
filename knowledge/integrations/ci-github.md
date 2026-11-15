@@ -27,4 +27,5 @@ Dispatch запускает `tests.yml`, передаёт существующи
 флаг не заменяет разрешение. Локальная проверка harness не запускает эти команды.
 
 Jenkins остаётся отдельной интеграцией из `Jenkinsfile` и README.
-Allure TestOps и `allurectl` этим harness не подключаются.
+TestOps подготовлен отдельным локальным CLI: [runbook](testops.md).
+Автоматическая загрузка в GitHub Actions/Jenkins не подключалась.

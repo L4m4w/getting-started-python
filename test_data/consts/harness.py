@@ -26,3 +26,35 @@ LAUNCH_FAILURE_CASES = (
     (KeyboardInterrupt(), INTERRUPT_EXIT_CODE, "interrupted"),
 )
 EXPECTED_RUN_COUNT = 2
+API_SELECTION = ("tests/api",)
+# Подменный набор контрактных исходников API и один отсутствующий файл.
+API_CONTRACT_SOURCES = MappingProxyType({
+    "tests/api/test_category_update.py": "def test_case():\n    pass\n",
+    "tests/api/conftest.py": "import pytest\n",
+    "infrastructure/http/client.py": "class HttpClient:\n    pass\n",
+    "requirements.txt": "pytest==9.1.1\n",
+})
+MISSING_CONTRACT_SOURCE = "tests/api/test_missing.py"
+ENV_FILENAME = ".env"
+APP_BASE_SHA = "b" * 40
+APP_PATCH_SHA256 = "d" * 64
+GATEWAY_IMAGE_ID = "f" * 12
+GATEWAY_IMAGE_MISMATCH = "0" * 12
+GATEWAY_CONTAINER = "catupdval-gateway-1"
+CONTAINER_ID = "e" * 64
+IMAGE_ID_FULL = "sha256:" + "f" * 64
+IMAGE_TAG = "qaguru/niffler-gateway-docker:catupdval-fix"
+# Ответ `docker container inspect` с секретным полем Env: в evidence
+# сохраняются только дистиллированные поля.
+DOCKER_INSPECT = MappingProxyType({
+    "Id": CONTAINER_ID,
+    "Name": f"/{GATEWAY_CONTAINER}",
+    "Image": IMAGE_ID_FULL,
+    "State": MappingProxyType({"Running": True}),
+    "Config": MappingProxyType({"Image": IMAGE_TAG,
+                                "Env": (f"API_PASSWORD={PRIVATE_VALUE}",)}),
+})
+NO_SUCH_CONTAINER_STDERR = "Error: No such container: gateway"
+DAEMON_DOWN_STDERR = "Cannot connect to the Docker daemon"
+INVALID_SHA = "not-a-sha"
+INVALID_CONTAINER_REF = "bad/name!"
