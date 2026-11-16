@@ -14,6 +14,21 @@ GITHUB_REPOSITORY=L4m4w/getting-started-python sh tools/gh.sh view-log 123
 При расследовании CI-only ошибки сначала прочитай лог нужного запуска.
 Наличие workflow не доказывает успешный прогон или работоспособность секретов.
 
+## Поведение по событиям (`tests.yml`)
+
+- `pull_request`: только offline unit-тесты — явная выборка `pytest tests/unit`,
+  без обращения к публичному SUT. Креды `EXISTING_USERNAME`/`EXISTING_PASSWORD`
+  и `BASE_URL`/`AUTH_URL` в тестовый шаг не передаются. Telegram-уведомление
+  и восстановление истории Allure из gh-pages (`git fetch`) не выполняются.
+  Деплой в gh-pages и так привязан к push master. Allure results/report
+  продолжают загружаться как artifacts; падение unit-тестов даёт красный job
+  (тот же паттерн `continue-on-error` → отчёт → `exit 1`).
+- `push` в `master` и `workflow_dispatch`: прежнее поведение — полный прогон
+  `pytest` (UI-тесты против `BASE_URL`/`AUTH_URL` с секретами), восстановление
+  истории, деплой отчёта в gh-pages на master, Telegram-уведомление.
+  Их UI/SUT effects сохраняются без изменений.
+- API runtime (`tests/api`), его секреты `API_*` и стенд в CI не подключены.
+
 Следующие команды выполняются только при имеющемся разрешении на CI-запуск:
 
 ```sh
