@@ -52,10 +52,22 @@ jobs:
         id: tests
         continue-on-error: true
         timeout-minutes: 15
-        run: pytest --browser=${{ env.BROWSER }} --alluredir=allure-results
+        env:
+          # На pull_request только offline unit-тесты: креды и URL стенда
+          # в тестовый шаг не передаются.
+          BASE_URL: ${{ github.event_name != 'pull_request' && env.BASE_URL || '' }}
+          AUTH_URL: ${{ github.event_name != 'pull_request' && env.AUTH_URL || '' }}
+          EXISTING_USERNAME: ${{ github.event_name != 'pull_request' && secrets.EXISTING_USERNAME || '' }}
+          EXISTING_PASSWORD: ${{ github.event_name != 'pull_request' && secrets.EXISTING_PASSWORD || '' }}
+        run: |
+          if [ "${{ github.event_name }}" = "pull_request" ]; then
+            pytest tests/unit --alluredir=allure-results
+          else
+            pytest --browser=${{ env.BROWSER }} --alluredir=allure-results
+          fi
 
       - name: Restore Allure history from gh-pages
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         continue-on-error: true
         run: |
           git fetch origin gh-pages:gh-pages || true
@@ -114,7 +126,7 @@ jobs:
       # сообщение уходит и при падении тестов. Без секретов шаг мягко
       # пропускается (скрипт печатает skip и завершается нулём).
       - name: Send Telegram notification
-        if: always()
+        if: always() && github.event_name != 'pull_request'
         env:
           TELEGRAM_TOKEN: ${{ secrets.TELEGRAM_TOKEN }}
           TELEGRAM_CHAT_ID: ${{ secrets.TELEGRAM_CHAT_ID }}

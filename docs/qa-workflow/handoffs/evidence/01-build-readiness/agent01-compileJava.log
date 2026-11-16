@@ -1,0 +1,26 @@
+To honour the JVM settings for this build a single-use Daemon process will be forked. For more on this, please refer to https://docs.gradle.org/8.6/userguide/gradle_daemon.html#sec:disabling_the_daemon in the Gradle documentation.
+Daemon will be stopped at the end of the build 
+
+> Task :niffler-gateway:schemaGen_jaxb-userdata
+Running XJC compiler for schema(s) /Users/zenalark/PycharmProjects/Test-java/niffler-py-st3/niffler-gateway/src/main/schemas/xjc/userdata.wsdl
+[ant:xjc] [WARNING] Are you trying to compile WSDL? Support for WSDL is experimental. You may enable it by using the -wsdl option.
+[ant:xjc] unknown location
+[ant:xjc] 
+
+> Task :niffler-grpc-common:extractIncludeProto
+> Task :niffler-grpc-common:extractProto
+> Task :niffler-grpc-common:generateProto
+> Task :niffler-grpc-common:compileJava
+> Task :niffler-grpc-common:processResources
+> Task :niffler-grpc-common:classes
+> Task :niffler-grpc-common:jar
+> Task :niffler-gateway:compileJava
+
+Deprecated Gradle features were used in this build, making it incompatible with Gradle 9.0.
+
+You can use '--warning-mode all' to show the individual deprecation warnings and determine if they come from your own scripts or plugins.
+
+For more on this, please refer to https://docs.gradle.org/8.6/userguide/command_line_interface.html#sec:command_line_warnings in the Gradle documentation.
+
+BUILD SUCCESSFUL in 44s
+8 actionable tasks: 8 executed
