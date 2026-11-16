@@ -177,7 +177,8 @@ class Orchestrator:
     def init(self, *, pilot_id, app_repo, app_base_sha, app_head_kind,
              app_head_sha256=None, app_head_git_sha=None, tests_commit=None,
              tests_dirty=None, tests_snapshot_sha256=None,
-             tests_repo_path=None, requirements_path,
+             tests_repo_path=None, tests_repo=None,
+             requirements_path,
              requirements_version="1", requirement_ids=None,
              app_repo_path=None, supersede=False,
              expected_executions=None, strength_evidence=None):
@@ -185,6 +186,12 @@ class Orchestrator:
             raise WorkflowValidationError(f"invalid pilot_id: {pilot_id!r}")
         app_base_sha = state_mod.require_git_sha(app_base_sha, "app_base_sha")
         repo_key = state_mod.normalize_repo_key(app_repo)
+        if tests_repo is None:
+            raise WorkflowValidationError(
+                "init requires tests_repo: the canonical remote key "
+                "of the tests repository")
+        tests_repo_key = state_mod.require_remote_repo_key(
+            tests_repo, "tests_repo")
         req_path = Path(requirements_path)
         if not req_path.is_file():
             req_path = self.root / requirements_path
@@ -248,9 +255,31 @@ class Orchestrator:
         workflow_dir = self.workflow_dir(workflow_id)
         supersedes_id = None
 
+        # A resume contradicting the recorded immutable tests remote
+        # must fail before any index or state write. Defense in
+        # depth, cheapest first: (1) this lock-free probe catches the
+        # sequential conflict with zero filesystem interaction;
+        # (2) the re-check under the index lock below catches a
+        # conflict that raced past the probe, before any index save;
+        # (3) the re-check under the workflow lock catches a state
+        # that materialized after the index-phase check.
+        probe = index_mod.find_entry(
+            index_mod.load_index(self.store_dir), repo_key, pilot_id)
+        if probe is not None and probe["base_sha"] == app_base_sha:
+            probe_state = state_mod.load_state(
+                self.workflow_dir(probe["workflow_id"]))
+            if probe_state is not None:
+                self._check_tests_repo_identity(probe_state,
+                                                tests_repo_key)
+
         # Index phase: never held across subprocess or state writes.
+        # The lock-free probe above only wins sequential conflicts; the
+        # authoritative tests-repo identity check runs here under the
+        # index lock, which serializes every concurrent init's index
+        # write — a conflicting remote is refused before any save.
         with self._index_locked(self.store_dir):
             index = index_mod.load_index(self.store_dir)
+            index_dirty = False
             entry = index_mod.find_entry(index, repo_key, pilot_id)
             if entry is not None:
                 recorded_base = entry["base_sha"]
@@ -271,9 +300,20 @@ class Orchestrator:
                     index_mod.register(
                         index, repo_key, pilot_id, workflow_id, app_base_sha,
                         status="creating", supersedes=supersedes_id)
+                    index_dirty = True
                 else:
                     workflow_id = entry["workflow_id"]
                     workflow_dir = self.workflow_dir(workflow_id)
+                    # state.json reads under the index lock are safe:
+                    # save_state is atomic (tmp+fsync+os.replace), so a
+                    # reader sees a complete state or none. A missing
+                    # view — the winner has registered the index but not
+                    # yet committed state — stays unchecked here and is
+                    # covered by the re-check under the workflow lock.
+                    recorded_state = state_mod.load_state(workflow_dir)
+                    if recorded_state is not None:
+                        self._check_tests_repo_identity(
+                            recorded_state, tests_repo_key)
                     # A crash between the index register and the state write
                     # must not silently start a parallel lineage: a recorded
                     # superseded list restores the link on recovery.
@@ -283,7 +323,12 @@ class Orchestrator:
             else:
                 index_mod.register(index, repo_key, pilot_id, workflow_id,
                                    app_base_sha, status="creating")
-            index_mod.save_index(self.store_dir, index)
+                index_dirty = True
+            # save_index stamps updated_at — an unchanged index must not
+            # be re-serialized, otherwise even a refused resume mutates
+            # the index file.
+            if index_dirty:
+                index_mod.save_index(self.store_dir, index)
 
         inherited = []
         if supersedes_id:
@@ -326,6 +371,7 @@ class Orchestrator:
                     pilot_id, repo_key, app_base_sha, revision_data,
                     app_repo_path=app_repo_path,
                     tests_repo_path=str(tests_root),
+                    tests_repo=tests_repo_key,
                     supersedes=supersedes_id,
                     inherited_intents=inherited)
                 for intent in inherited:
@@ -344,6 +390,7 @@ class Orchestrator:
                 state_mod.save_state(workflow_dir, state)
                 outcome = "created"
             else:
+                self._check_tests_repo_identity(state, tests_repo_key)
                 outcome = self._update_input(state, revision_data,
                                              app_repo_path)
                 state_mod.save_state(workflow_dir, state)
@@ -368,6 +415,21 @@ class Orchestrator:
             return "resumed"
         state_mod.apply_revision(state, revision_data, "init with new input")
         return "revisioned"
+
+    @staticmethod
+    def _check_tests_repo_identity(state, tests_repo_key):
+        """Recorded immutable tests remote vs the init argument."""
+        recorded = (state["input"].get("identity") or {})\
+            .get("tests_repo")
+        if recorded is None:
+            raise WorkflowBlockedError(
+                "the recorded workflow predates tests_repo identity; "
+                "init --tests-repo cannot backfill it — initialize a "
+                "new workflow store")
+        if recorded != tests_repo_key:
+            raise WorkflowBlockedError(
+                f"init tests_repo {tests_repo_key!r} conflicts with "
+                f"the recorded immutable identity {recorded!r}")
 
     # -- status / doctor -------------------------------------------------
 
@@ -606,7 +668,7 @@ class Orchestrator:
                 if exec_entry.get("bound_revision") != state["input"][
                         "revision"]:
                     continue
-                ev_dir = Path(exec_entry["evidence_dir"])
+                ev_dir = self._recorded_execution_dirs(exec_entry)[0]
                 manifest, _ = adapters.read_manifest(ev_dir)
                 if manifest is None:
                     continue
@@ -1142,16 +1204,353 @@ class Orchestrator:
             self._scenario_contract, variant, state, manifest,
             Path(evidence_dir), testops_state=testops_state)
 
+    # -- recorded evidence locations -----------------------------------------
+
+    @staticmethod
+    def _contained(path, root):
+        """Resolved ``path`` stays inside resolved ``root``.
+
+        ``Path.resolve`` collapses ``..`` segments and follows symlinks,
+        so both traversal and symlink escapes are caught.
+        """
+        try:
+            Path(path).resolve().relative_to(Path(root).resolve())
+        except (OSError, ValueError):
+            return False
+        return True
+
+    def _resolve_evidence_root(self, evidence_root):
+        """Validate a caller ``--evidence-root`` before any evidence
+        read."""
+        raw = Path(str(evidence_root))
+        if not raw.is_absolute():
+            raise WorkflowValidationError(
+                "--evidence-root must be an absolute project root path")
+        resolved = raw.resolve()
+        if not resolved.is_dir():
+            raise WorkflowValidationError(
+                f"--evidence-root is not an existing directory: "
+                f"{evidence_root!r}")
+        if self._contained(resolved, self.root):
+            raise WorkflowValidationError(
+                "--evidence-root must stay outside the local project root")
+        store = self.store_dir.resolve()
+        if (self._contained(resolved, store)
+                or self._contained(store, resolved)):
+            raise WorkflowValidationError(
+                "--evidence-root and the workflow store must be disjoint "
+                "so store locks and temp writes never land in the "
+                "historical tree")
+        return resolved
+
+    def _execution_dirs(self, execution_id, root=None):
+        """Derived ``(harness_dir, testops_dir)`` under an evidence root.
+
+        Locations are always derived from ``root`` + execution id —
+        recorded or caller-supplied dir strings are never trusted as
+        independent locations.
+        """
+        base = Path(root) if root is not None else self.root
+        return (base / "artifacts" / "harness" / execution_id,
+                base / "artifacts" / "testops" / execution_id)
+
+    def _recorded_execution_dirs(self, entry, execution_id=None):
+        """Single location resolver for recorded executions.
+
+        External evidence reads go through the recorded
+        ``evidence_root``; every other execution keeps the default
+        local layout. A recorded root is re-validated on EVERY call —
+        canonical, existing, disjoint from the store and consistent
+        with the recorded derived dirs — so a replaced symlink or a
+        moved mount can never redirect a later re-import/rebind/observe
+        read outside the accepted tree, and writes can never land in
+        the historical tree.
+        """
+        eid = execution_id or entry["execution_id"]
+        if entry.get("evidence_root"):
+            self._validate_persisted_root(entry)
+        return self._execution_dirs(eid, root=entry.get("evidence_root"))
+
+    def _validate_persisted_root(self, entry):
+        """Re-check a recorded ``evidence_root`` before any later read.
+
+        The persisted root must still be an absolute, canonical,
+        existing directory, different from the project root, disjoint
+        from the workflow store and consistent with the recorded
+        derived dirs — every drift is a controlled block, never a
+        silent foreign read.
+        """
+        execution_id = entry["execution_id"]
+        recorded = entry.get("evidence_root")
+        raw = Path(str(recorded))
+        if not raw.is_absolute():
+            raise WorkflowBlockedError(
+                f"recorded evidence_root for {execution_id} is not an "
+                f"absolute path: {recorded!r}")
+        resolved = raw.resolve()
+        if str(resolved) != recorded:
+            raise WorkflowBlockedError(
+                f"recorded evidence_root for {execution_id} is no "
+                f"longer canonical: {recorded!r} now resolves to "
+                f"{resolved!r}")
+        if not resolved.is_dir():
+            raise WorkflowBlockedError(
+                f"recorded evidence_root for {execution_id} no longer "
+                f"exists: {recorded!r}")
+        if self._contained(resolved, self.root):
+            raise WorkflowBlockedError(
+                f"recorded evidence_root for {execution_id} overlaps "
+                "the local project root")
+        store = self.store_dir.resolve()
+        if (self._contained(resolved, store)
+                or self._contained(store, resolved)):
+            raise WorkflowBlockedError(
+                f"recorded evidence_root for {execution_id} is no "
+                "longer disjoint from the workflow store")
+        evidence_dir, testops_dir = self._execution_dirs(
+            execution_id, root=resolved)
+        for key, derived in (("evidence_dir", evidence_dir),
+                             ("testops_state_dir", testops_dir)):
+            if not self._contained(derived, resolved):
+                raise WorkflowBlockedError(
+                    f"derived {key} for {execution_id} escapes the "
+                    f"recorded evidence root: {derived}")
+            recorded_dir = entry.get(key)
+            if recorded_dir and str(derived) != recorded_dir:
+                raise WorkflowBlockedError(
+                    f"recorded {key} for {execution_id} is inconsistent "
+                    f"with its evidence root: {recorded_dir!r} != "
+                    f"{derived}")
+        state_file = testops_dir / "state.json"
+        if (state_file.is_symlink() or state_file.exists()) \
+                and not self._contained(state_file, resolved):
+            raise WorkflowBlockedError(
+                f"testops state for {execution_id} escapes the "
+                f"recorded evidence root: {state_file}")
+
+    def _recorded_testops_dir(self, state, execution_id):
+        entry = next(
+            (item for item in state.get("executions") or []
+             if item.get("execution_id") == execution_id), None)
+        if entry is None:
+            return self._execution_dirs(execution_id)[1]
+        return self._recorded_execution_dirs(entry)[1]
+
+    @staticmethod
+    def _require_local_evidence(entry, operation):
+        """External historical evidence is read-only forever.
+
+        Any delegated TestOps operation (prepare/publish/verify) writes
+        state, locks, temp files and packages under the execution dir —
+        for an imported external baseline that would mean writes into
+        the historical tree. The refusal is unconditional and does not
+        depend on the recorded upload status.
+        """
+        if (entry or {}).get("evidence_root"):
+            raise WorkflowBlockedError(
+                f"{operation} is forbidden for execution "
+                f"{entry['execution_id']}: evidence lives under "
+                f"external read-only root {entry['evidence_root']!r}")
+
+    def _external_pre_manifest_problems(self, evidence_dir, testops_dir,
+                                        root):
+        """Phase-1 containment, proven BEFORE the manifest JSON is read.
+
+        The root, both derived evidence directories and the manifest
+        path itself must resolve inside the accepted root — a symlinked
+        directory or manifest can never smuggle a foreign file into
+        ``read_manifest``.
+        """
+        problems = []
+        root = Path(root).resolve()
+        if not root.is_dir():
+            problems.append(f"evidence root is not a directory: {root}")
+
+        def check(what, path):
+            if not self._contained(path, root):
+                problems.append(
+                    f"{what} escapes the evidence root: {path}")
+
+        check("harness evidence dir", evidence_dir)
+        check("testops state dir", testops_dir)
+        check("manifest", Path(evidence_dir) / "manifest.json")
+        state_file = Path(testops_dir) / "state.json"
+        if state_file.is_symlink() or state_file.exists():
+            check("testops state", state_file)
+        for what, member in (
+                ("manifest", Path(evidence_dir) / "manifest.json"),
+                ("testops state", state_file)):
+            if member.exists() and not member.is_file():
+                problems.append(f"{what}: non-regular evidence file {member}")
+        return problems
+
+    @staticmethod
+    def _tree_member_problems(directory, root, what):
+        """Every member reachable under ``directory`` stays inside
+        ``root``.
+
+        Enumerates real directory entries — including members reached
+        through symlinked directories — WITHOUT reading any member
+        content. Escaping links, broken symlinks, directory cycles and
+        listing/stat errors become problems: a controlled refusal,
+        never a crash and never a foreign read. A missing plain
+        directory has nothing to check; absence is reported by the
+        later evidence checks, not here.
+        """
+        problems = []
+        root = Path(root).resolve()
+        stack = [(Path(directory), frozenset())]
+        while stack:
+            current, ancestors = stack.pop()
+            try:
+                resolved_dir = current.resolve()
+            except OSError as error:
+                problems.append(
+                    f"{what}: cannot resolve directory {current}: "
+                    f"{error}")
+                continue
+            if resolved_dir in ancestors:
+                problems.append(
+                    f"{what}: directory cycle at {current}")
+                continue
+            try:
+                entries = sorted(os.scandir(current),
+                                 key=lambda item: item.name)
+            except FileNotFoundError:
+                if current.is_symlink() or current.exists():
+                    problems.append(
+                        f"{what}: broken symlink directory {current}")
+                continue
+            except OSError as error:
+                problems.append(
+                    f"{what}: cannot list directory {current}: {error}")
+                continue
+            for item in entries:
+                member = Path(item.path)
+                try:
+                    resolved_member = member.resolve()
+                except OSError as error:
+                    problems.append(
+                        f"{what}: cannot resolve member {member}: "
+                        f"{error}")
+                    continue
+                if not Orchestrator._contained(resolved_member, root):
+                    problems.append(
+                        f"{what} member escapes the evidence root: "
+                        f"{member}")
+                    continue
+                try:
+                    if item.is_symlink() and not member.exists():
+                        problems.append(
+                            f"{what}: broken symlink member {member}")
+                        continue
+                    if item.is_dir(follow_symlinks=True):
+                        stack.append(
+                            (member, ancestors | {resolved_dir}))
+                    elif not item.is_file(follow_symlinks=True):
+                        problems.append(
+                            f"{what}: non-regular evidence member {member}")
+                except OSError as error:
+                    problems.append(
+                        f"{what}: cannot stat member {member}: {error}")
+        return problems
+
+    def _external_containment_problems(self, manifest, evidence_dir,
+                                       testops_dir, root):
+        """Phase-2 containment, proven BEFORE any member content read.
+
+        Re-proves the phase-1 paths, then every path the verification
+        will actually open: manifest-declared artifact paths (defaults
+        included), every enumerated member of the allure-results,
+        sources/copies and TestOps directories — result, container,
+        digest, attachment and copy members alike — and the declared
+        source copies.
+        """
+        problems = adapters.manifest_shape_problems(manifest)
+        if problems:
+            return problems
+        root = Path(root).resolve()
+        evidence_dir = Path(evidence_dir)
+        testops_dir = Path(testops_dir)
+
+        def check(what, path):
+            if not self._contained(path, root):
+                problems.append(
+                    f"{what} escapes the evidence root: {path}")
+
+        check("harness evidence dir", evidence_dir)
+        check("testops state dir", testops_dir)
+        check("manifest", evidence_dir / "manifest.json")
+        state_file = testops_dir / "state.json"
+        if state_file.is_symlink() or state_file.exists():
+            check("testops state", state_file)
+
+        artifacts = (manifest or {}).get("artifacts") or {}
+        artifact_paths = {}
+        for key, rel in artifacts.items():
+            if not isinstance(rel, str) or not rel:
+                problems.append(
+                    f"manifest.artifacts.{key} must be a non-empty "
+                    f"evidence-relative path, got {rel!r}")
+                continue
+            rel_path = Path(rel)
+            if rel_path.is_absolute():
+                problems.append(
+                    f"manifest.artifacts.{key} must be evidence-relative, "
+                    f"got absolute {rel!r}")
+                continue
+            artifact_paths[key] = rel_path
+            check(f"manifest.artifacts.{key}", evidence_dir / rel_path)
+
+        junit_rel = artifact_paths.get("junit") or Path("junit.xml")
+        check("junit", evidence_dir / junit_rel)
+        for member in (evidence_dir / junit_rel, evidence_dir / "junit.xml"):
+            if member.exists() and not member.is_file():
+                problems.append(f"junit: non-regular evidence file {member}")
+        # The recount always opens the literal junit.xml regardless of
+        # the declared artifacts.junit path — it must be contained too.
+        if junit_rel != Path("junit.xml"):
+            check("junit recount", evidence_dir / "junit.xml")
+        allure_rel = (artifact_paths.get("allure_results")
+                      or Path("allure-results"))
+        check("allure results dir", evidence_dir / allure_rel)
+        copies_root = evidence_dir / (
+            artifact_paths.get("sources") or Path("sources"))
+        check("source copies dir", copies_root)
+
+        source = (manifest or {}).get("source_identity") or {}
+        for rel in source.get("copies") or []:
+            rel_path = Path(str(rel))
+            if rel_path.is_absolute():
+                problems.append(
+                    f"source copy path must be relative, got {rel!r}")
+                continue
+            check("source copy", copies_root / rel_path)
+
+        for what, member_dir in (
+                ("allure results", evidence_dir / allure_rel),
+                ("source copies", copies_root),
+                ("testops state", testops_dir)):
+            problems.extend(
+                self._tree_member_problems(member_dir, root, what))
+        return problems
+
     # -- import-execution ---------------------------------------------------
 
     def import_execution(self, execution_id, workflow_id=None,
-                         provenance=None):
+                         provenance=None, evidence_root=None):
         """Read-only adoption of existing run/TestOps evidence.
 
         ``provenance`` is permitted only for ``variant == "base"`` and must
         be a versioned ``historical_baseline_acceptance`` record matching an
         authoritative coordinator-accepted baseline record, concrete review
         decisions on disk and exact manifest/junit/allure/source digests.
+
+        ``evidence_root`` (an absolute project root that owns
+        ``artifacts/harness/<id>`` and ``artifacts/testops/<id>``) is
+        accepted only together with ``provenance`` for that accepted
+        baseline: the location is recorded per execution and the external
+        tree stays read-only forever.
         """
         if not state_mod.EXECUTION_ID_RE.fullmatch(execution_id or ""):
             raise WorkflowValidationError(
@@ -1159,6 +1558,13 @@ class Orchestrator:
         if provenance is not None and not isinstance(provenance, dict):
             raise WorkflowValidationError(
                 "provenance must be a versioned JSON object")
+        if evidence_root is not None and provenance is None:
+            raise WorkflowValidationError(
+                "--evidence-root requires --provenance: an external "
+                "evidence root is accepted only for a provenance-bound "
+                "historical baseline")
+        resolved_root = (self._resolve_evidence_root(evidence_root)
+                         if evidence_root is not None else None)
         workflow_id = self._resolve_workflow_id(workflow_id)
         workflow_dir = self.workflow_dir(workflow_id)
         adapter = adapters.TestOpsAdapter(self.root, self.runner)
@@ -1174,24 +1580,51 @@ class Orchestrator:
                           if item["execution_id"] == execution_id), None)
             if entry is not None:
                 return self._reimport_recorded_execution(
-                    state, workflow_dir, adapter, entry, provenance)
-            evidence_dir = self.root / "artifacts" / "harness" / execution_id
-            manifest, manifest_sha = adapters.read_manifest(evidence_dir)
+                    state, workflow_dir, adapter, entry, provenance,
+                    evidence_root=resolved_root)
+            evidence_dir, testops_dir = self._execution_dirs(
+                execution_id, root=resolved_root)
+            if resolved_root is not None:
+                escape = self._external_pre_manifest_problems(
+                    evidence_dir, testops_dir, resolved_root)
+                if escape:
+                    return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                            "detail": "external evidence containment "
+                                      "rejected: " + "; ".join(escape),
+                            "problems": escape}
+            try:
+                manifest, manifest_sha = adapters.read_manifest(
+                    evidence_dir)
+            except WorkflowValidationError as error:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": f"manifest unreadable: {error}"}
             if manifest is None or manifest.get("status") != "completed":
                 raise WorkflowBlockedError(
                     f"no completed harness manifest for {execution_id}")
+            if resolved_root is not None:
+                escape = self._external_containment_problems(
+                    manifest, evidence_dir, testops_dir, resolved_root)
+                if escape:
+                    return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                            "detail": "external evidence containment "
+                                      "rejected: " + "; ".join(escape),
+                            "problems": escape}
             recounted = adapters.junit_summary(evidence_dir / "junit.xml")
             if recounted is None or recounted != manifest.get("junit_summary"):
                 raise WorkflowBlockedError(
                     f"junit evidence for {execution_id} is unreadable or "
                     "inconsistent with the manifest")
             try:
-                testops_state = adapter.read_execution_state(execution_id)
+                testops_state = adapter.read_execution_state(
+                    execution_id, state_dir=testops_dir)
             except tstate.StateCorruptError as error:
                 raise WorkflowBlockedError(
                     f"TestOps state for {execution_id} is corrupt: "
                     f"{error}") from error
-            self._verify_testops_source(adapter, execution_id, testops_state)
+            self._verify_testops_source(
+                adapter, execution_id, testops_state,
+                base_root=(resolved_root
+                           if resolved_root is not None else self.root))
             try:
                 self._require_fresh(state)
             except WorkflowBlockedError as error:
@@ -1207,9 +1640,15 @@ class Orchestrator:
                         "detail": f"manifest for {execution_id} declares no "
                                   "usable app identity or an undeclared "
                                   f"variant ({variant!r})"}
-            problems = self._manifest_problems(
-                state, manifest, evidence_dir, provenance=provenance,
-                manifest_sha256=manifest_sha, testops_state=testops_state)
+            try:
+                problems = self._manifest_problems(
+                    state, manifest, evidence_dir, provenance=provenance,
+                    manifest_sha256=manifest_sha,
+                    testops_state=testops_state)
+            except OSError as error:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": "evidence verification read failed: "
+                                  f"{error}"}
             if problems:
                 return {"outcome": "blocked", "exit": EXIT_BLOCKED,
                         "detail": "evidence identity rejected: "
@@ -1233,9 +1672,11 @@ class Orchestrator:
                 "status": "completed",
                 "selection": manifest.get("selection"),
                 "recorded_at": state_mod.utc_now(),
-                "testops_state_dir": str(adapter.state_dir(execution_id))}
+                "testops_state_dir": str(testops_dir)}
             if provenance is not None:
                 execution["provenance"] = provenance
+            if resolved_root is not None:
+                execution["evidence_root"] = str(resolved_root)
             state["executions"].append(execution)
             state_mod.set_intent(intent, "completed",
                                  {"outcome": "imported",
@@ -1244,30 +1685,52 @@ class Orchestrator:
                                   variant=variant)
             state_mod.clear_status(state)
             state_mod.refresh_phase(state)
-            state_mod.add_journal(state, "orchestrator", "import-execution",
-                                  f"{execution_id} imported "
-                                  f"(variant={execution['variant']}, "
-                                  f"bound_revision={bound})")
+            state_mod.add_journal(
+                state, "orchestrator", "import-execution",
+                f"{execution_id} imported "
+                f"(variant={execution['variant']}, bound_revision={bound}"
+                + (f", evidence_root={resolved_root}"
+                   if resolved_root is not None else "") + ")")
             state_mod.save_state(workflow_dir, state)
             return {"outcome": "imported", "execution_id": execution_id,
                     "variant": execution["variant"],
                     "bound_revision": bound}
 
     def _reimport_recorded_execution(self, state, workflow_dir, adapter,
-                                     entry, provenance):
+                                     entry, provenance, *,
+                                     evidence_root=None):
         """Re-import of an already recorded execution id.
 
-        An entry bound to the current revision is an honest no-op. Head
-        evidence of a past revision is never reused: a changed head
-        requires a new head run — only a base execution may be re-bound
-        to the current revision, and only after the same full live
-        verification a fresh import performs (manifest, junit recount,
-        source/scenario/provenance/environment identity and preflight).
-        The rebind is journaled as audit; evidence and history are never
-        rewritten, and a repeat after a successful bind is a no-op.
+        An entry bound to the current revision is an honest no-op — but
+        only when the fresh input does not contradict the record: a caller
+        ``evidence_root`` different from the recorded one, or a provenance
+        record different from the recorded acceptance, is a controlled
+        conflict decided BEFORE the no-op answer. Head evidence of a past
+        revision is never reused: a changed head requires a new head run —
+        only a base execution may be re-bound to the current revision, and
+        only after the same full live verification a fresh import performs
+        (manifest, junit recount, source/scenario/provenance/environment
+        identity and preflight). The rebind is journaled as audit;
+        evidence and history are never rewritten, and a repeat after a
+        successful bind is a no-op.
         """
         execution_id = entry["execution_id"]
         revision = state["input"]["revision"]
+        recorded_root = entry.get("evidence_root")
+        caller_root = (str(evidence_root)
+                       if evidence_root is not None else None)
+        if caller_root is not None and caller_root != recorded_root:
+            return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                    "detail": f"re-import evidence root {caller_root!r} "
+                              f"contradicts the recorded location "
+                              f"{recorded_root!r} of {execution_id}; the "
+                              "recorded location wins"}
+        if (provenance is not None
+                and entry.get("provenance") is not None
+                and provenance != entry["provenance"]):
+            return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                    "detail": "re-import provenance contradicts the "
+                              "recorded acceptance record"}
         if entry.get("bound_revision") == revision:
             return {"outcome": "no-op",
                     "detail": "execution already recorded at this "
@@ -1279,15 +1742,22 @@ class Orchestrator:
                               f"revision {entry.get('bound_revision')}; "
                               "head evidence of a past revision is never "
                               "reused — record a new head execution"}
-        if (provenance is not None
-                and entry.get("provenance") is not None
-                and provenance != entry["provenance"]):
-            return {"outcome": "blocked", "exit": EXIT_BLOCKED,
-                    "detail": "re-import provenance contradicts the "
-                              "recorded acceptance record"}
         provenance = (provenance if provenance is not None
                       else entry.get("provenance"))
-        evidence_dir = Path(entry["evidence_dir"])
+        try:
+            evidence_dir, testops_dir = self._recorded_execution_dirs(
+                entry)
+        except WorkflowBlockedError as error:
+            return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                    "detail": str(error)}
+        if recorded_root is not None:
+            escape = self._external_pre_manifest_problems(
+                evidence_dir, testops_dir, Path(recorded_root))
+            if escape:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": "external evidence containment "
+                                  "rejected: " + "; ".join(escape),
+                        "problems": escape}
         try:
             manifest, manifest_sha = adapters.read_manifest(evidence_dir)
         except WorkflowValidationError as error:
@@ -1298,27 +1768,45 @@ class Orchestrator:
                     "detail": f"no completed harness manifest for "
                               f"{execution_id}; the recorded base stays "
                               "bound to its revision"}
+        if recorded_root is not None:
+            escape = self._external_containment_problems(
+                manifest, evidence_dir, testops_dir,
+                Path(recorded_root))
+            if escape:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": "external evidence containment "
+                                  "rejected: " + "; ".join(escape),
+                        "problems": escape}
         recounted = adapters.junit_summary(evidence_dir / "junit.xml")
         if recounted is None or recounted != manifest.get("junit_summary"):
             return {"outcome": "blocked", "exit": EXIT_BLOCKED,
                     "detail": "junit evidence unreadable or inconsistent "
                               "with the manifest"}
         try:
-            testops_state = adapter.read_execution_state(execution_id)
+            testops_state = adapter.read_execution_state(
+                execution_id, state_dir=testops_dir)
         except tstate.StateCorruptError as error:
             return {"outcome": "blocked", "exit": EXIT_BLOCKED,
                     "detail": f"TestOps state for {execution_id} is "
                               f"corrupt: {error}"}
         try:
-            self._verify_testops_source(adapter, execution_id,
-                                        testops_state)
+            self._verify_testops_source(
+                adapter, execution_id, testops_state,
+                base_root=(Path(recorded_root)
+                           if recorded_root is not None else self.root))
             self._require_fresh(state)
         except WorkflowBlockedError as error:
             return {"outcome": "blocked", "exit": EXIT_BLOCKED,
                     "detail": str(error)}
-        problems = self._manifest_problems(
-            state, manifest, evidence_dir, provenance=provenance,
-            manifest_sha256=manifest_sha, testops_state=testops_state)
+        try:
+            problems = self._manifest_problems(
+                state, manifest, evidence_dir, provenance=provenance,
+                manifest_sha256=manifest_sha,
+                testops_state=testops_state)
+        except OSError as error:
+            return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                    "detail": "evidence verification read failed: "
+                              f"{error}"}
         if problems:
             return {"outcome": "blocked", "exit": EXIT_BLOCKED,
                     "detail": "evidence identity rejected: "
@@ -1339,10 +1827,20 @@ class Orchestrator:
                 "bound_revision": revision}
 
     def _verify_testops_source(self, adapter, execution_id,
-                               testops_state=None):
-        """Exact integrity check of an uploaded execution before import."""
+                               testops_state=None, *, state_dir=None,
+                               base_root=None):
+        """Exact integrity check of an uploaded execution before import.
+
+        ``state_dir`` is the recorded TestOps location for the execution
+        (default: the local layout). Recorded ``results.path`` and
+        ``package.dir`` resolve relative to ``base_root`` — the external
+        evidence root for an imported baseline — and every resolved path
+        must stay inside it: absolute paths are valid only within the
+        chosen root.
+        """
         if testops_state is None:
-            testops_state = adapter.read_execution_state(execution_id)
+            testops_state = adapter.read_execution_state(
+                execution_id, state_dir=state_dir)
         if testops_state is None:
             return
         upload = testops_state.get("upload") or {}
@@ -1350,16 +1848,38 @@ class Orchestrator:
             return
         package = testops_state.get("package") or {}
         source = testops_state.get("results") or {}
+        base = Path(base_root) if base_root is not None else self.root
         try:
             source_path = Path(source["path"])
             if not source_path.is_absolute():
-                source_path = self.root / source_path
+                source_path = base / source_path
+            if not self._contained(source_path, base):
+                raise WorkflowBlockedError(
+                    f"execution {execution_id} results.path escapes its "
+                    f"evidence root: {source_path}")
             pkg_dir = Path(package["dir"])
             if not pkg_dir.is_absolute():
-                pkg_dir = self.root / pkg_dir
+                pkg_dir = base / pkg_dir
+            if not self._contained(pkg_dir, base):
+                raise WorkflowBlockedError(
+                    f"execution {execution_id} package.dir escapes its "
+                    f"evidence root: {pkg_dir}")
+            member_problems = (
+                self._tree_member_problems(
+                    source_path, base,
+                    f"execution {execution_id} results.path")
+                + self._tree_member_problems(
+                    pkg_dir, base,
+                    f"execution {execution_id} package.dir"))
+            if member_problems:
+                raise WorkflowBlockedError(
+                    f"execution {execution_id} uploaded evidence "
+                    "members fail containment: "
+                    + "; ".join(member_problems))
             tresults.verify_source_digest(source_path, package["input_sha256"])
             tresults.verify_package(pkg_dir, package["sha256"])
-        except (tresults.ResultsIntegrityError, KeyError, TypeError) as error:
+        except (tresults.ResultsIntegrityError, KeyError, TypeError,
+                OSError) as error:
             raise WorkflowBlockedError(
                 f"execution {execution_id} uploaded package fails integrity: "
                 f"{error}") from error
@@ -1379,8 +1899,10 @@ class Orchestrator:
                 (item.get("variant")
                  for item in state.get("executions") or []
                  if item.get("execution_id") == execution_id), None)
+        state_dir = self._recorded_testops_dir(state, execution_id)
         try:
-            testops_state = adapter.read_execution_state(execution_id)
+            testops_state = adapter.read_execution_state(
+                execution_id, state_dir=state_dir)
         except tstate.StateCorruptError as error:
             raise WorkflowBlockedError(
                 f"TestOps state for {execution_id} is corrupt: "
@@ -1389,11 +1911,18 @@ class Orchestrator:
             return testops_state
         pubs = state["publications"]["testops"]
         pubs["execution_id"] = execution_id
+        try:
+            state_sha = adapter.execution_state_sha256(
+                execution_id, state_dir=state_dir)
+        except OSError as error:
+            raise WorkflowBlockedError(
+                f"TestOps state for {execution_id} is unhashable: "
+                f"{error}") from error
         pubs["last_observation"] = {
             "upload_status": (testops_state.get("upload") or {}).get("status"),
             "launch_id": (testops_state.get("launch") or {}).get("id"),
             "checked_at": state_mod.utc_now(),
-            "state_sha256": adapter.execution_state_sha256(execution_id)}
+            "state_sha256": state_sha}
         return testops_state
 
     # -- publish-testops -----------------------------------------------------
@@ -1548,6 +2077,7 @@ class Orchestrator:
                 raise WorkflowBlockedError(
                     f"execution {execution_id} is not recorded in this "
                     "workflow")
+            self._require_local_evidence(entry, "prepare-testops")
             if (entry.get("variant") != "head"
                     or entry.get("bound_revision")
                     != state["input"]["revision"]):
@@ -1566,19 +2096,22 @@ class Orchestrator:
             if not mapping:
                 raise WorkflowBlockedError("accepted bindings mapping empty")
             manifest = {}
+            evidence_dir = self._recorded_execution_dirs(entry)[0]
             try:
-                manifest, _ = adapters.read_manifest(entry["evidence_dir"])
+                manifest, _ = adapters.read_manifest(evidence_dir)
             except WorkflowValidationError:
                 manifest = {}
-            results_dir = Path(entry["evidence_dir"]) / (
+            results_dir = Path(evidence_dir) / (
                 ((manifest or {}).get("artifacts") or {}).get("allure_results")
                 or "allure-results")
             if not results_dir.is_dir():
                 raise WorkflowBlockedError(
                     f"no allure results directory for {execution_id}: "
                     f"{results_dir}")
+            state_dir = self._recorded_testops_dir(state, execution_id)
             try:
-                testops_state = adapter.read_execution_state(execution_id)
+                testops_state = adapter.read_execution_state(
+                    execution_id, state_dir=state_dir)
             except tstate.StateCorruptError as error:
                 raise WorkflowBlockedError(
                     f"TestOps state for {execution_id} is corrupt: "
@@ -1603,7 +2136,8 @@ class Orchestrator:
             prior_cp = entry.get("testops_prepare") or {}
             checkpoint = self._prepare_checkpoint_record(
                 execution_id, expected, plan_ok, assign_ok, package_ok,
-                testops_state, adapter.execution_state_sha256(execution_id))
+                testops_state, adapter.execution_state_sha256(
+                    execution_id, state_dir=state_dir))
 
             if package_ok:
                 already_saved = (
@@ -1654,7 +2188,8 @@ class Orchestrator:
                     continue
                 outcome = adapter.run(argv)
                 try:
-                    testops_state = adapter.read_execution_state(execution_id)
+                    testops_state = adapter.read_execution_state(
+                        execution_id, state_dir=state_dir)
                 except tstate.StateCorruptError as error:
                     raise WorkflowBlockedError(
                         f"TestOps state corrupted during {name}: "
@@ -1665,7 +2200,8 @@ class Orchestrator:
                 entry["testops_prepare"] = self._prepare_checkpoint_record(
                     execution_id, expected, ok_after[0], ok_after[1],
                     ok_after[2], testops_state,
-                    adapter.execution_state_sha256(execution_id))
+                    adapter.execution_state_sha256(
+                        execution_id, state_dir=state_dir))
                 if outcome.error or outcome.code != 0:
                     state_mod.record_error(
                         state, "prepare_testops", name,
@@ -1719,16 +2255,20 @@ class Orchestrator:
                 raise WorkflowBlockedError(
                     f"verify-testops requires phase executed; current "
                     f"phase is {state['phase']}")
-            if not any(entry["execution_id"] == execution_id
-                       for entry in state["executions"]):
+            entry = next((item for item in state["executions"]
+                          if item["execution_id"] == execution_id), None)
+            if entry is None:
                 raise WorkflowBlockedError(
                     f"execution {execution_id} is not recorded in this "
                     "workflow")
+            self._require_local_evidence(entry, "verify-testops")
             if not online:
                 raise WorkflowPermissionError(
                     "verify-testops performs remote reads; pass --online")
+            state_dir = self._recorded_testops_dir(state, execution_id)
             try:
-                testops_state = adapter.read_execution_state(execution_id)
+                testops_state = adapter.read_execution_state(
+                    execution_id, state_dir=state_dir)
             except tstate.StateCorruptError as error:
                 raise WorkflowBlockedError(
                     f"TestOps state for {execution_id} is corrupt: "
@@ -1833,6 +2373,7 @@ class Orchestrator:
                 raise WorkflowBlockedError(
                     f"execution {execution_id} is not recorded in this "
                     "workflow")
+            self._require_local_evidence(entry, "publish-testops")
             if (entry.get("variant") != "head"
                     or entry.get("bound_revision")
                     != state["input"]["revision"]):
@@ -1843,8 +2384,10 @@ class Orchestrator:
                 raise WorkflowPermissionError(
                     "publish-testops performs external writes; pass "
                     "--execute")
+            state_dir = self._recorded_testops_dir(state, execution_id)
             try:
-                testops_state = adapter.read_execution_state(execution_id)
+                testops_state = adapter.read_execution_state(
+                    execution_id, state_dir=state_dir)
             except tstate.StateCorruptError as error:
                 raise WorkflowBlockedError(
                     f"TestOps state for {execution_id} is corrupt: "
@@ -1870,8 +2413,9 @@ class Orchestrator:
                 ((state["artifacts"].get("bindings") or {})
                  .get("mapping") or {}).items()
             }
-            manifest, _ = adapters.read_manifest(entry["evidence_dir"])
-            results_dir = Path(entry["evidence_dir"]) / (
+            evidence_dir = self._recorded_execution_dirs(entry)[0]
+            manifest, _ = adapters.read_manifest(evidence_dir)
+            results_dir = Path(evidence_dir) / (
                 ((manifest or {}).get("artifacts") or {}).get("allure_results")
                 or "allure-results")
             expected = self._scan_prepare_expectations(
@@ -2039,8 +2583,23 @@ class Orchestrator:
 
     def _reconcile_upload(self, state, adapter, intent):
         execution_id = intent.get("target", {}).get("execution")
+        entry = next(
+            (item for item in state.get("executions") or []
+             if item.get("execution_id") == execution_id), None)
+        if entry is not None and entry.get("evidence_root"):
+            # External historical evidence never drives an upload
+            # intent: no adoption, no retry permission, no delegated
+            # call and no foreign read — the intent stays unfinished
+            # for manual resolution.
+            return {"intent": intent["intent_id"], "action": "blocked",
+                    "detail": f"execution {execution_id} evidence lives "
+                              f"under external read-only root "
+                              f"{entry['evidence_root']!r}; the intent "
+                              "stays unfinished for manual resolution"}
+        state_dir = self._recorded_testops_dir(state, execution_id)
         try:
-            testops_state = adapter.read_execution_state(execution_id)
+            testops_state = adapter.read_execution_state(
+                execution_id, state_dir=state_dir)
         except tstate.StateCorruptError as error:
             state_mod.record_error(state, "reconcile",
                                    "testops_state_corrupt",
@@ -2172,8 +2731,12 @@ class Orchestrator:
     def _pr_repo_key(self, state, role):
         if role == "app":
             return state["input"]["identity"]["app_repo"]
-        local = (state["input"].get("locals") or {}).get("tests_repo_path")
-        return state_mod.normalize_repo_key(local or str(self.root))
+        tests_repo = state["input"]["identity"].get("tests_repo")
+        if tests_repo is None:
+            raise WorkflowBlockedError(
+                "tests repo remote identity is not recorded; a tests "
+                "PR spec requires init --tests-repo first")
+        return tests_repo
 
     def _pr_search_key(self, role, spec):
         spec = spec or {}

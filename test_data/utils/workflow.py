@@ -2,13 +2,17 @@
 фиктивные evidence и подменный runner/transport. Всё offline в temp dirs."""
 import hashlib
 import json
+import os
 from pathlib import Path
+import shutil
+import stat
 import xml.etree.ElementTree as ET
 
 from infrastructure.reporting.testops import results as tresults
 from infrastructure.reporting.testops import state as tstate
 from infrastructure.workflow import adapters, contracts
 from test_data.consts import workflow as C
+from test_data.consts import workflow_tests_repo as RC
 from tools import harness as harness_mod
 
 
@@ -47,18 +51,113 @@ def default_source_files():
     return files
 
 
-def snapshot_tree(root):
-    """Снимок файлов checkout (без служебных artifacts/ и envelopes/)."""
+def snapshot_tree(root, *, include_artifacts=False):
+    """Снимок файлов checkout; ``include_artifacts=True`` захватывает
+    artifacts/ и ТЕКСТ symlink-ссылок (os.readlink), а не байты их целей
+    (read-only контроль внешних evidence). Для полного metadata+content
+    no-write контроля используй ``snapshot_tree_metadata``."""
     root = Path(root)
     tree = {}
     for path in sorted(root.rglob("*")):
-        if not path.is_file():
-            continue
         rel = path.relative_to(root).as_posix()
-        if rel.startswith(("artifacts/", "envelopes/")):
+        if (not include_artifacts
+                and rel.startswith(("artifacts/", "envelopes/"))):
             continue
-        tree[rel] = path.read_bytes()
+        if path.is_symlink():
+            tree[rel] = ("symlink", os.readlink(path))
+        elif path.is_file():
+            tree[rel] = path.read_bytes()
     return tree
+
+
+def snapshot_tree_metadata(root, *, include_artifacts=False):
+    """Полный metadata+content снимок дерева для no-write проверок.
+
+    Отдельный helper: API ``snapshot_tree`` и его consumers не меняются.
+    Фиксирует ВСЕ записи дерева — включая каталоги и пустые каталоги —
+    по относительному имени: тип (``dir``/``file``/``symlink``/``other``),
+    текст symlink (``target``), SHA-256 содержимого файла, осмысленные
+    mode (permission bits) и ``mtime_ns``. ``atime`` исключён — он
+    зависит от чтений. Создание lock-каталога, изменение режима или
+    содержимого файла таким снимком обнаруживается.
+
+    Важно: запись symlink содержит текст ссылки (``os.readlink``), а не
+    байты цели — изменение содержимого цели вне дерева снимком не
+    отслеживается.
+    """
+    root = Path(root)
+    tree = {}
+    for path in sorted(root.rglob("*")):
+        rel = path.relative_to(root).as_posix()
+        if (not include_artifacts
+                and rel.startswith(("artifacts/", "envelopes/"))):
+            continue
+        try:
+            stat_result = path.lstat()
+        except OSError as error:
+            tree[rel] = {"type": "error", "detail": str(error)}
+            continue
+        entry = {"mode": stat.S_IMODE(stat_result.st_mode),
+                 "mtime_ns": stat_result.st_mtime_ns}
+        if path.is_symlink():
+            entry["type"] = "symlink"
+            entry["target"] = os.readlink(path)
+        elif path.is_dir():
+            entry["type"] = "dir"
+        elif path.is_file():
+            entry["type"] = "file"
+            entry["size"] = stat_result.st_size
+            entry["sha256"] = hashlib.sha256(
+                path.read_bytes()).hexdigest()
+        else:
+            entry["type"] = "other"
+        tree[rel] = entry
+    return tree
+
+
+def move_evidence(src_root, dst_root, execution_id):
+    """Перенести ``artifacts/harness/<id>`` целиком между project roots.
+
+    Manifest не содержит абсолютных путей, поэтому перенос сохраняет
+    digests для provenance records.
+    """
+    src = Path(src_root) / "artifacts" / "harness" / execution_id
+    dest = Path(dst_root) / "artifacts" / "harness" / execution_id
+    dest.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(src), str(dest))
+    return dest
+
+
+def historical_acceptance(evidence_dir, *, review_doc, historical_sha,
+                          current_sha, changed_file=None):
+    """Versioned ``historical_baseline_acceptance`` record, привязанный
+    к digest реального evidence каталога."""
+    evidence_dir = Path(evidence_dir)
+    changed_file = changed_file or C.TEST_FILES[0]
+    return {
+        "schema_version": contracts.HISTORICAL_PROVENANCE_SCHEMA_VERSION,
+        "kind": contracts.HISTORICAL_PROVENANCE_KIND,
+        "pilot_id": C.PILOT_ID,
+        "execution_id": evidence_dir.name,
+        "variant": "base",
+        "app_base_sha": C.APP_BASE_SHA,
+        "manifest_sha256": sha256_file(evidence_dir / "manifest.json"),
+        "junit_sha256": sha256_file(evidence_dir / "junit.xml"),
+        "allure_results_sha256": tresults.results_digest(
+            evidence_dir / "allure-results"),
+        "contract_version": harness_mod.API_CONTRACT_VERSION,
+        "tests_repo": {"commit": C.TESTS_COMMIT_2, "dirty": False},
+        "review_decisions": [review_doc],
+        "equivalence_scope": {
+            "allowed_changed_files": {
+                changed_file: {
+                    "historical_sha256": historical_sha,
+                    "current_sha256": current_sha,
+                    "reason": "runtime ALLURE_ID markup added after baseline",
+                },
+            },
+        },
+    }
 
 
 class FakeRunner:
@@ -706,6 +805,7 @@ class Project:
                     app_base_sha=C.APP_BASE_SHA, app_head_kind="patch",
                     app_head_sha256=C.APP_PATCH_SHA256,
                     tests_commit=C.TESTS_COMMIT, tests_dirty=False,
+                    tests_repo=RC.TESTS_REPO,
                     requirements_path=C.REQUIREMENTS_REL,
                     requirement_ids=C.REQUIREMENT_IDS,
                     app_repo_path=str(self.app_repo),

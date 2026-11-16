@@ -88,3 +88,16 @@ disposable-стеке (см. handoff 07 и ограничения evidence в т
 
 CLI: `verify --online --transport rest` выбирает REST явно; default —
 allurectl. Оба пути проверяют package/source и связь с записанной отправкой.
+
+
+## Workflow clean-revision routing
+
+API/schema/parser и реальные сигнатуры recorded-evidence helpers описаны в
+[каталоге workflow](workflow.md#clean-revision-routing-принятый-интерфейс-33r).
+`infrastructure.workflow.state.require_remote_repo_key(value, field)` —
+чистый canonical GitHub repo parser с raw-segment rejection; helper
+`remote_repo_key_parts(key)` и `REMOTE_*` контракт используются вместе с
+GitHub transport. Пример: `require_remote_repo_key(remote, "tests_repo")`.
+Private `_reject_raw_path_segments` валидирует raw components до normalize.
+Для external-root import применяются two-phase containment и recorded-root
+revalidation; publication/lineage/provenance gates сохраняются.

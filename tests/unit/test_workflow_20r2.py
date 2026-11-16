@@ -19,6 +19,7 @@ from infrastructure.workflow.state import (
     WorkflowBlockedError, WorkflowSchemaError)
 from test_data.consts import category_update as cat_consts
 from test_data.consts import workflow as C
+from test_data.consts import workflow_tests_repo as RC
 from test_data.utils import workflow as utils
 from tools import harness as harness_mod
 
@@ -555,6 +556,7 @@ class TestR2GitHeadSeparation:
                  "--app-repo", C.APP_REPO, "--app-base-sha", head,
                  "--app-patch-sha256", C.APP_PATCH_SHA256,
                  "--tests-commit", head, dirty_flag,
+                 "--tests-repo", RC.TESTS_REPO,
                  "--app-repo-path", str(repo_root),
                  "--requirements", str(project.root / C.REQUIREMENTS_REL)],
                 cwd=repo_root, capture_output=True, text=True, timeout=60)

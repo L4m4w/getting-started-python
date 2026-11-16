@@ -155,6 +155,108 @@ def normalize_repo_key(repo):
     return key or repo
 
 
+# Strict remote repo identity contract, shared with the PR transport
+# (github.py aliases these constants): exactly one host, an owner and a
+# repo name. The check is pure string work — no HTTP, no token reads,
+# no transport construction.
+REMOTE_REPO_HOST = "github.com"
+REMOTE_REPO_SCHEMES = ("http", "https", "ssh", "git")
+REMOTE_OWNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
+REMOTE_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
+
+
+def remote_repo_key_parts(key):
+    """(owner, name) of a canonical remote repo key, or None.
+
+    ``key`` must spell ``github.com/owner/repo`` exactly — the host
+    compares case-insensitively, owner/repo keep their case. This is the
+    same strict contract the PR transport enforces on ``spec.repo``;
+    keeping the split in one pure helper prevents divergent rules.
+    """
+    if not isinstance(key, str):
+        return None
+    parts = key.split("/")
+    if len(parts) != 3 or parts[0].lower() != REMOTE_REPO_HOST:
+        return None
+    owner, name = parts[1], parts[2]
+    if not REMOTE_OWNER_RE.fullmatch(owner):
+        return None
+    if not REMOTE_NAME_RE.fullmatch(name) or name in (".", ".."):
+        return None
+    return owner, name
+
+
+def _reject_raw_path_segments(path, field, original):
+    """Refuse raw ``.``/``..``/empty path segments before normalization.
+
+    ``os.path.normpath`` folds ``a/../b`` into ``b`` — checking only the
+    normalized key would silently re-brand the spelled input into a
+    different canonical identity (F33-A1). Every raw segment between
+    separators must be non-empty and not ``.``/``..``; a single leading
+    separator (URL absolute path) and a single trailing separator (the
+    accepted trailing slash) are tolerated.
+    """
+    segments = path.split("/")
+    if segments and segments[0] == "":
+        segments = segments[1:]
+    if segments and segments[-1] == "":
+        segments = segments[:-1]
+    if any(seg in ("", ".", "..") for seg in segments):
+        raise WorkflowValidationError(
+            f"{field}: {original!r} contains empty, '.' or '..' raw "
+            "path segments; spell the remote without traversal or "
+            "duplicate separators")
+
+
+def require_remote_repo_key(value, field):
+    """Canonical ``github.com/owner/repo`` key or WorkflowValidationError.
+
+    Accepted spellings — an ``http``/``https``/``ssh``/``git`` URL, the
+    scp-like ``git@host:owner/repo`` form and an already canonical key —
+    normalize to ``github.com/owner/repo`` with the owner/repo case
+    kept; a trailing ``.git`` or ``/`` folds away. Everything else is
+    refused: local or bare paths, ``owner/repo`` without a host, extra
+    path segments, traversal, userinfo, explicit ports, query strings,
+    fragments and other URL schemes.
+    """
+    if not isinstance(value, str) or not value.strip():
+        raise WorkflowValidationError(
+            f"{field}: expected a remote repo URL or the canonical "
+            f"{REMOTE_REPO_HOST}/owner/repo key")
+    raw = value.strip()
+    if "://" in raw:
+        try:
+            parts = urlsplit(raw)
+            scheme = parts.scheme
+            userinfo = (parts.username is not None
+                        or parts.password is not None)
+            port = parts.port
+            extras = bool(parts.query or parts.fragment)
+        except ValueError:
+            raise WorkflowValidationError(
+                f"{field}: malformed remote repo URL: {value!r}") \
+                from None
+        if (scheme not in REMOTE_REPO_SCHEMES or userinfo
+                or port is not None or extras):
+            raise WorkflowValidationError(
+                f"{field}: remote repo URL must be a plain "
+                "http/https/ssh/git URL — no userinfo, port, query "
+                "or fragment")
+        raw_path = parts.path or ""
+    elif raw.startswith("git@") and ":" in raw[4:]:
+        raw_path = raw[4:].partition(":")[2]
+    else:
+        raw_path = raw
+    _reject_raw_path_segments(raw_path, field, value)
+    key = normalize_repo_key(raw)
+    parsed = remote_repo_key_parts(key)
+    if parsed is None:
+        raise WorkflowValidationError(
+            f"{field}: {value!r} does not resolve to the canonical "
+            f"{REMOTE_REPO_HOST}/owner/repo key")
+    owner, name = parsed
+    return f"{REMOTE_REPO_HOST}/{owner}/{name}"
+
 def workflow_id_for(pilot_id, repo_key, base_sha):
     material = ("wf-v1\x00" + pilot_id + "\x00" + repo_key + "\x00"
                 + base_sha.lower())
@@ -175,10 +277,13 @@ def revision_data_digest(revision_data):
 
 def new_state(pilot_id, app_repo, app_base_sha, revision_data, *,
               app_repo_path=None, supersedes=None, inherited_intents=None,
-              tests_repo_path=None):
+              tests_repo_path=None, tests_repo=None):
     repo_key = normalize_repo_key(app_repo)
     identity = {"pilot_id": pilot_id, "app_repo": repo_key,
                 "app_base_sha": app_base_sha.lower()}
+    if tests_repo is not None:
+        identity["tests_repo"] = require_remote_repo_key(
+            tests_repo, "tests_repo")
     workflow_id = workflow_id_for(pilot_id, repo_key, app_base_sha)
     now = utc_now()
     state = {
@@ -331,6 +436,34 @@ def _validate_execution(entry):
         if selection.get("scope") is not None:
             _require(isinstance(selection["scope"], str),
                      "executions[].selection.scope must be a string")
+    for field_name in ("evidence_dir", "testops_state_dir"):
+        value = entry.get(field_name)
+        if value is not None:
+            _require(isinstance(value, str) and value,
+                     f"executions[].{field_name} must be a non-empty "
+                     "string")
+    evidence_root = entry.get("evidence_root")
+    if evidence_root is not None:
+        _require(isinstance(evidence_root, str)
+                 and Path(evidence_root).is_absolute(),
+                 "executions[].evidence_root must be an absolute path "
+                 "string")
+        _require(entry.get("variant") == "base",
+                 "executions[].evidence_root is only valid for base "
+                 "executions")
+        _require(isinstance(entry.get("provenance"), dict),
+                 "executions[].evidence_root requires recorded "
+                 "provenance")
+        _require(entry.get("evidence_dir")
+                 == str(Path(evidence_root) / "artifacts" / "harness"
+                        / entry["execution_id"]),
+                 "executions[].evidence_dir must derive from "
+                 "evidence_root and the execution id")
+        _require(entry.get("testops_state_dir")
+                 == str(Path(evidence_root) / "artifacts" / "testops"
+                        / entry["execution_id"]),
+                 "executions[].testops_state_dir must derive from "
+                 "evidence_root and the execution id")
 
 
 def _validate_execution_requirement(entry, where):
@@ -575,6 +708,18 @@ def validate_state(data):
     base_sha = identity.get("app_base_sha")
     _require(_is_hex(base_sha, HEX40_64),
              "identity.app_base_sha must be 40-64 hex")
+    if "tests_repo" in identity:
+        tests_remote = identity["tests_repo"]
+        canonical = None
+        if isinstance(tests_remote, str):
+            try:
+                canonical = require_remote_repo_key(
+                    tests_remote, "identity.tests_repo")
+            except WorkflowValidationError:
+                canonical = None
+        _require(canonical is not None and canonical == tests_remote,
+                 "identity.tests_repo must be the canonical "
+                 "github.com/owner/repo key when recorded")
     _require(WORKFLOW_ID_RE.fullmatch(data.get("workflow_id") or "")
              and data["workflow_id"]
              == workflow_id_for(pilot_id, repo_key, base_sha),

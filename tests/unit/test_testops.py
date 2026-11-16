@@ -433,6 +433,9 @@ class TestCliIntegrity:
     def test_project_dotenv(self, tmp_path, monkeypatch, source, capsys):
         with allure.step("Изолировать окружение и корень проекта"):
             monkeypatch.setattr(testops, "ROOT", tmp_path)
+            # Enable dotenv only inside this isolated synthetic tmp root.
+            # monkeypatch restores the outer safety flag after this test.
+            monkeypatch.delenv("PYTHON_DOTENV_DISABLED", raising=False)
             monkeypatch.delenv("ALLURE_TOKEN", raising=False)
             if source != "missing":
                 (tmp_path / ".env").write_text(f"ALLURE_TOKEN={TOKEN_ENV}\n")
@@ -442,6 +445,20 @@ class TestCliIntegrity:
             testops.load_environment()
             expected = {"dotenv": TOKEN_ENV, "exported": ALLURECTL_PATH, "missing": None}[source]
             assert testops._token() == expected
+            captured = capsys.readouterr()
+            assert TOKEN_ENV not in captured.out + captured.err
+
+
+    @allure.title("Флаг отключения dotenv не загружает даже synthetic tmp .env")
+    def test_project_dotenv_disabled(self, tmp_path, monkeypatch, capsys):
+        with allure.step("Изолировать root и явно отключить dotenv"):
+            monkeypatch.setattr(testops, "ROOT", tmp_path)
+            monkeypatch.delenv("ALLURE_TOKEN", raising=False)
+            monkeypatch.setenv("PYTHON_DOTENV_DISABLED", "1")
+            (tmp_path / ".env").write_text(f"ALLURE_TOKEN={TOKEN_ENV}\n")
+        with allure.step("Проверить отказ загрузки без вывода synthetic token"):
+            testops.load_environment()
+            assert testops._token() is None
             captured = capsys.readouterr()
             assert TOKEN_ENV not in captured.out + captured.err
 

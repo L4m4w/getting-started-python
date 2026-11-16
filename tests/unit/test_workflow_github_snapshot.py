@@ -377,7 +377,7 @@ class TestOrchestratorSnapshot:
                 overrides.setdefault("app_repo", c.REPO_KEY)
                 if role == "tests":
                     overrides.setdefault(
-                        "tests_repo_path", s.TESTS_REPO_KEY)
+                        "tests_repo", s.TESTS_REPO_KEY)
                 return super().init(orchestrator, **overrides)
 
         return GitHubProject(root)

@@ -120,6 +120,7 @@ def cmd_init(options, parser):
         tests_dirty=options.tests_dirty,
         tests_snapshot_sha256=options.tests_snapshot_sha256,
         tests_repo_path=options.tests_repo_path,
+        tests_repo=options.tests_repo,
         requirements_path=options.requirements,
         requirements_version=options.requirements_version,
         requirement_ids=(options.requirement_ids.split(",")
@@ -175,7 +176,7 @@ def cmd_import_execution(options, parser):
             parser.error(f"provenance file is not valid JSON: {error}")
     result = _orchestrator(options).import_execution(
         options.execution, workflow_id=options.workflow_id,
-        provenance=provenance)
+        provenance=provenance, evidence_root=options.evidence_root)
     _print(result)
     return _exit_of(result)
 
@@ -291,6 +292,10 @@ def main():
                             "is then required or auto-computed")
     init.set_defaults(tests_dirty=None)
     init.add_argument("--tests-repo-path")
+    init.add_argument("--tests-repo", required=True,
+                      help="canonical remote key of the tests "
+                           "repository (https/ssh/scp spellings "
+                           "normalize to github.com/owner/repo)")
     init.add_argument("--requirements", required=True)
     init.add_argument("--requirements-version", default="1")
     init.add_argument("--requirement-ids",
@@ -327,6 +332,12 @@ def main():
                      help="JSON file with a versioned "
                           "historical_baseline_acceptance record bound to "
                           "accepted review decisions and evidence digests")
+    imp.add_argument("--evidence-root",
+                     help="absolute external project root holding "
+                          "artifacts/harness/<id> and "
+                          "artifacts/testops/<id>; accepted only together "
+                          "with --provenance for an accepted historical "
+                          "baseline and kept read-only")
     prep = actions.add_parser(
         "prepare-testops",
         help="local plan/assign/package chain for a recorded execution")

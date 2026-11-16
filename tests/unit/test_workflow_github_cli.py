@@ -44,15 +44,9 @@ SUBPROCESS_TIMEOUT_S = 120
 class _CliProject(Project):
     """Project с canonical github.com repo keys для production CLI."""
 
-    def __init__(self, root, *, tests_repo_path=None):
-        self._cli_tests_repo_path = tests_repo_path
-        super().__init__(root)
-
     def init(self, orchestrator=None, **overrides):
         overrides.setdefault("app_repo", c.APP_REPO_KEY)
-        if self._cli_tests_repo_path is not None:
-            overrides.setdefault("tests_repo_path",
-                                 self._cli_tests_repo_path)
+        overrides.setdefault("tests_repo", c.TESTS_REPO_KEY)
         return super().init(orchestrator, **overrides)
 
 
@@ -92,11 +86,9 @@ def _absolutize_state(project, state):
             state_mod.revision_data_digest(revision)
 
 
-def _fixture(tmp_path, *, tests_role=False):
+def _fixture(tmp_path):
     """Commit-head clean-tests проект до executed + абсолютные пути."""
-    project = _CliProject(
-        tmp_path,
-        tests_repo_path=c.TESTS_REPO_KEY if tests_role else None)
+    project = _CliProject(tmp_path)
     project.drive_commit_to_executed()
     workflow_dir = next(
         path for path in project.store_dir.iterdir()
@@ -121,16 +113,12 @@ def _git_entry(fake_git, fs_root):
                         for sha, tree in fake_git.commits.items()}}
 
 
-def _scenario(project, http_rules, *, tests_role=False):
+def _scenario(project, http_rules):
     git_map = {
         str(project.app_repo.resolve()):
-            _git_entry(project.git, project.app_repo)}
-    if tests_role:
-        git_map[c.TESTS_REPO_KEY] = _git_entry(project.tests_git,
-                                               project.root)
-    else:
-        git_map[str(project.root.resolve())] = _git_entry(
-            project.tests_git, project.root)
+            _git_entry(project.git, project.app_repo),
+        str(project.root.resolve()):
+            _git_entry(project.tests_git, project.root)}
     return {"git": git_map, "http": list(http_rules)}
 
 
@@ -422,7 +410,7 @@ class TestCliCreate:
     @allure.title("tests: prepare → create verified по clean commit "
                   "и contract scope")
     def test_tests_create_verified(self, tmp_path):
-        project, workflow_dir = _fixture(tmp_path, tests_role=True)
+        project, workflow_dir = _fixture(tmp_path)
         title = f"[{workflow_dir.name}] {c.PR_TITLE}"
         detail = gc.pr_payload(
             number=c.PR_NUMBER, title=title, body=c.BODY_TEXT,
@@ -447,7 +435,7 @@ class TestCliCreate:
              "path_re": _pulls_re(c.TESTS_REPO_FULL),
              "status": 201, "body": detail},
         ]
-        scenario = _scenario(project, rules, tests_role=True)
+        scenario = _scenario(project, rules)
         env, log_path = _env(tmp_path, scenario)
         with allure.step("prepare spec"):
             result = _cli(["--pr-transport", "github"]

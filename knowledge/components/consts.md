@@ -109,3 +109,15 @@ http-слой `GitHubPrTransport` и `GitReadAdapter` по JSON-сценарию
 отключения guard'ов не добавляет. Пример:
 `env, log = _env(tmp_path, scenario)` в
 `tests/unit/test_workflow_github_cli.py`.
+
+
+Данные clean-revision routing regressions —
+`test_data.consts.workflow_tests_repo`: `TESTS_REPO`, `TESTS_REPO_KEY`,
+accepted spellings, `TESTS_REPO_OTHER_KEY`, `INVALID_TESTS_REPO_INPUTS`,
+`TRAVERSAL_TESTS_REPO_INPUTS`. Только synthetic repo inputs; пример:
+`@pytest.mark.parametrize("value", RC.TRAVERSAL_TESTS_REPO_INPUTS)`.
+
+`test_data.consts.workflow_historical_root` содержит synthetic execution IDs,
+root names, forbidden path/member names и forged digest для containment/
+external-root no-write regressions. Пример:
+`ext_root = tmp_path / HR.EXTERNAL_ROOT_NAME` в unit fixture.

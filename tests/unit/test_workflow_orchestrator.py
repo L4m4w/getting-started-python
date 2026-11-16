@@ -14,6 +14,7 @@ from infrastructure.workflow.locks import WorkflowLock
 from infrastructure.workflow.state import (
     WorkflowBlockedError, WorkflowStateCorruptError)
 from test_data.consts import workflow as C
+from test_data.consts import workflow_tests_repo as RC
 from test_data.utils import workflow as utils
 
 
@@ -267,6 +268,7 @@ class TestCli:
             C.APP_REPO, "--app-base-sha", C.APP_BASE_SHA,
             "--app-patch-sha256", C.APP_PATCH_SHA256,
             "--tests-commit", C.TESTS_COMMIT, "--tests-clean",
+            "--tests-repo", RC.TESTS_REPO,
             "--requirements", str(project.root / C.REQUIREMENTS_REL))
         assert result.returncode == 0, result.stderr
         assert "wf-" in result.stdout
@@ -278,6 +280,7 @@ class TestCli:
             C.APP_REPO, "--app-base-sha", "0000",
             "--app-patch-sha256", C.APP_PATCH_SHA256,
             "--tests-commit", C.TESTS_COMMIT, "--tests-clean",
+            "--tests-repo", RC.TESTS_REPO,
             "--requirements", str(project.root / C.REQUIREMENTS_REL))
         assert result.returncode == 69
         assert result.stdout == ""

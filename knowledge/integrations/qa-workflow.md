@@ -104,6 +104,7 @@ sh tools/run-workflow.sh init \
   --app-repo https://github.com/L4m4w/niffler-py-st3 \
   --app-base-sha 36674280b6878540a9e88f40aaeedf5dfdd2e6ce \
   --app-patch-sha256 04eb4c87... \
+  --tests-repo https://github.com/L4m4w/getting-started-python \
   --tests-commit <sha> --tests-clean \
   --requirements docs/qa-workflow/pilots/category-update-validation/requirement.md \
   --app-repo-path ../niffler-py-st3
@@ -116,6 +117,23 @@ Head формы: `--app-head-sha <sha>` (`kind=commit`), `--app-patch-sha256`
 `--expect-head-passed N` / `--expect-base-failed N` переопределяют
 execution-гейты ревизии (дефолты пилота: head — 6 passed, base — 4 ожидаемых
 негативных failures).
+
+`--tests-repo` — обязательный canonical remote тестового репозитория,
+сохраняемый в `identity.tests_repo` **отдельно** от
+`locals.tests_repo_path` (локальный checkout продолжает обслуживать
+commit/dirty/tree gates). Значение нормализуется `normalize_repo_key`
+(https/ssh/scp/`.git` spellings приняты, case owner/repo сохраняется) и
+проверяется чистым строгим owner/repo-контрактом без HTTP/транспорта/
+token reads: пустые segments, traversal, userinfo/query/fragment,
+local/bare path и лишние segments отклоняются. Identity immutable: resume
+с другим remote блокируется **до** записей state/index; `workflow_id` и
+index key не зависят от `--tests-repo` (same repo + pilot + app base
+сохраняют линию). State schema остаётся v1: `identity.tests_repo` —
+опциональный ключ для чтения старых store, но если присутствует —
+обязан быть валидным canonical remote (`None` не считается валидным
+legacy key). Старый store без `identity.tests_repo` читается
+status/doctor без миграции; новый init и `pr prepare --repo tests` на
+нём дают 69 — backfill remote и fallback на local path отсутствуют.
 
 ## Accept артефактов через envelope
 
@@ -218,6 +236,31 @@ SHA, противоречие — 69.
 проверкой исторического sha256 в manifest и текущего sha256 в checkout).
 Самостоятельно составленный payload по отклонённому manifest не проходит.
 
+`import-execution` дополнительно принимает `--evidence-root <absolute
+project root>`: evidence читается из `<root>/artifacts/harness/<id>` и
+`<root>/artifacts/testops/<id>` внешнего исторического root. Флаг
+разрешён только вместе с `--provenance` и фактически только для
+accepted baseline (`variant = "base"`: head evidence по внешнему root
+отклоняется до общих проверок). Resolved root обязан существовать,
+находиться вне store dir и быть отделён от нового store — locks/tmp/
+state/package writes в исторический root не выполняются. Containment:
+resolved harness/testops директории и все используемые subpaths
+(manifest/JUnit/Allure/copies, `results.path`, `package.dir`) обязаны
+остаться внутри выбранного root; symlink escape и произвольные external
+пути из записанного state отклоняются. Location сохраняется
+типизированной записью per execution (`evidence_root`,
+`testops_state_dir`) и используется restart/reimport/base-rebind
+чтениями — директории выводятся из root + ID, а не принимаются от
+caller. Reimport того же ID с иной location/provenance — контролируемый
+конфликт **до** same-revision no-op; прежний безопасный no-op без
+конфликтного входа сохраняется. Execution с external root read-only
+навсегда: `prepare-testops`, `publish-testops`, `verify-testops` и
+reconcile upload отказывают **до** делегированного subprocess даже если
+его TestOps state неожиданно `sent`/`uploaded` (запрет не опирается на
+pending status); observation/import/rebind читают state, а
+head-публикация TestOps от base не перезаписывается.
+Missing/corrupt/mismatch — отказ.
+
 ## Публикация и checkpoints TestOps (R4)
 
 ```sh
@@ -263,6 +306,9 @@ sh tools/run-workflow.sh --pr-transport github pr create --repo app \
   --execute --online
 ```
 
+`spec.repo` роли `tests` — canonical `identity.tests_repo` из init
+(локальный checkout path в spec не попадает); при отсутствии записанной
+identity `pr prepare --repo tests` блокируется 69 до сборки spec.
 Без `--pr-transport` (default `none`) `search`/`create` дают `77` —
 транспорт не поставляется по умолчанию. `--pr-transport github` подключает
 принятый в wave 30 `GitHubPrTransport` (22A+22AR) без изменений: repo
@@ -371,3 +417,24 @@ Re-import записанного base после T8 возвращает `reboun
 `bound_revision` текущей ревизии и audit-событием `base-rebind` после
 полной проверки. Повтор в той же ревизии — `no-op`; head прежней
 ревизии — `blocked`, без переиспользования старого head execution.
+
+
+### Routing 33R: граница local checkout и external evidence
+
+`--tests-repo` — обязательный remote identity input нового init; это не путь
+локального checkout. Immutable conflict той же линии проверяется до index/
+state writes, в том числе при concurrent init; gates/locks могут создаваться
+в новом store. Старый store остаётся читаемым без миграции/backfill.
+
+External baseline import использует `--evidence-root /abs/HIST` вместе с
+`--provenance /abs/accepted-baseline-record.json`. Manifest containment
+проверяется до JSON read, default/member paths — до чтения contents;
+recorded root повторно проверяется при rebind/observe. External prepare/
+publish/verify и upload reconcile не допускаются даже при sent/uploaded.
+Исторический root должен оставаться без внешних writers во время операции:
+check/read не является атомарным filesystem snapshot.
+
+Для clean-head этапа не принимать старый run-ni_5bvnc как прогон новых commits.
+Новый actual API run выполняется после final clean QA freeze по отдельному
+разрешению; uploaded текущего head требуется для полного published.
+Routing unit regressions не заменяют этот API/TestOps/live GitHub этап.

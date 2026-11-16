@@ -268,20 +268,80 @@ class HarnessAdapter:
         return outcome, (found[0] if found else None)
 
 
+def manifest_shape_problems(manifest):
+    """Container types required before manifest readers dereference fields.
+
+    Missing/null fields keep their old semantics; evidence/provenance gates
+    still decide completeness, identity and exact accepted digests.
+    """
+    if not isinstance(manifest, dict):
+        return ["manifest must be an object"]
+    problems = []
+    for name in ("artifacts", "environment", "selection", "repository",
+                 "source_identity"):
+        value = manifest.get(name)
+        if value is not None and not isinstance(value, dict):
+            problems.append(f"manifest.{name} must be an object or null")
+    for parent, child, kind in (
+            ("environment", "declared", dict),
+            ("environment", "container_check", dict),
+            ("selection", "targets", list),
+            ("source_identity", "copies", list)):
+        container = manifest.get(parent)
+        if not isinstance(container, dict):
+            continue
+        value = container.get(child)
+        if value is not None and not isinstance(value, kind):
+            problems.append(f"manifest.{parent}.{child} has invalid container type")
+        elif isinstance(value, list) and any(not isinstance(v, str) for v in value):
+            problems.append(f"manifest.{parent}.{child} entries must be strings")
+    environment = manifest.get("environment")
+    declared = environment.get("declared") if isinstance(environment, dict) else None
+    repository = manifest.get("repository")
+    for container, field, label in (
+            (declared, "app_base_sha", "environment.declared.app_base_sha"),
+            (declared, "app_patch_sha256", "environment.declared.app_patch_sha256"),
+            (repository, "commit", "repository.commit")):
+        if isinstance(container, dict):
+            value = container.get(field)
+            if value is not None and not isinstance(value, str):
+                problems.append(f"manifest.{label} must be a string or null")
+    artifacts = manifest.get("artifacts")
+    if isinstance(artifacts, dict):
+        for key, value in artifacts.items():
+            if value is not None and (not isinstance(value, str) or not value):
+                problems.append(f"manifest.artifacts.{key} must be a path string or null")
+    return problems
+
+
 def read_manifest(evidence_dir):
     """(manifest, sha256) of a harness evidence dir; corrupt is explicit."""
     path = Path(evidence_dir) / "manifest.json"
     if not path.is_file():
         return None, None
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
+        text = path.read_text(encoding="utf-8")
+    except OSError as error:
+        raise state_mod.WorkflowValidationError(
+            f"evidence manifest unreadable: {path}: {error}") from error
+    try:
+        data = json.loads(text)
     except ValueError as error:
         raise state_mod.WorkflowValidationError(
             f"evidence manifest is not valid JSON: {path}") from error
     if not isinstance(data, dict) or data.get("schema_version") != 2:
         raise state_mod.WorkflowValidationError(
             f"unsupported evidence manifest schema in {path}")
-    return data, state_mod.sha256_file(path)
+    shape_problems = manifest_shape_problems(data)
+    if shape_problems:
+        raise state_mod.WorkflowValidationError(
+            "evidence manifest shape rejected: " + "; ".join(shape_problems))
+    try:
+        digest = state_mod.sha256_file(path)
+    except OSError as error:
+        raise state_mod.WorkflowValidationError(
+            f"evidence manifest unhashable: {path}: {error}") from error
+    return data, digest
 
 
 def junit_summary(path):
@@ -327,12 +387,18 @@ class TestOpsAdapter:
     def state_dir(self, execution_id):
         return self.root / "artifacts" / "testops" / execution_id
 
-    def read_execution_state(self, execution_id):
+    def read_execution_state(self, execution_id, state_dir=None):
+        """Read execution state; ``state_dir`` overrides the local
+        default with a recorded location (read-only either way)."""
         from infrastructure.reporting.testops import state as tstate
-        return tstate.load_state(self.state_dir(execution_id))
+        base = (Path(state_dir) if state_dir is not None
+                else self.state_dir(execution_id))
+        return tstate.load_state(base)
 
-    def execution_state_sha256(self, execution_id):
-        path = self.state_dir(execution_id) / "state.json"
+    def execution_state_sha256(self, execution_id, state_dir=None):
+        base = (Path(state_dir) if state_dir is not None
+                else self.state_dir(execution_id))
+        path = base / "state.json"
         return state_mod.sha256_file(path) if path.is_file() else None
 
     def plan_args(self, execution_id, results_dir):

@@ -4,6 +4,10 @@ GitHub transport/body/CLI этапа 22 принят offline:
 [wave 31](../../docs/qa-workflow/handoffs/coordination-wave-31.md).
 Live GitHub и immutable heads этим не подтверждены.
 
+Routing-контракт 32A (`--tests-repo`/`--evidence-root`) принят с
+уточнениями 32-review; точные имена helper'ов сверяются при final
+integration A/B-кода.
+
 [Оглавление каталога](README.md)
 
 Минимальный CLI-оркестратор QA workflow (задачи 20 / 20R / 20R2): версированный
@@ -42,7 +46,8 @@ store флаг обязателен для всех команд — автов�
 
 | Компонент | Назначение | Пример |
 | --- | --- | --- |
-| `new_state`, `load_state`, `save_state` | Schema-1 state, строгая валидация, атомарная запись tmp+fsync+replace | `state = load_state(workflow_dir)` |
+| `new_state`, `load_state`, `save_state` | Schema-1 state, строгая валидация, атомарная запись tmp+fsync+replace; `new_state(..., tests_repo=...)` сохраняет canonical remote в `identity.tests_repo` (опциональный ключ schema v1: старый store читается без миграции, присутствующее поле обязано быть валидным remote, `None` — не legacy key) | `state = load_state(workflow_dir)` |
+| `require_remote_repo_key` | Строгий чистый owner/repo-контракт canonical remote без HTTP/транспорта/token reads; отклоняет пустые segments, traversal, userinfo/query/fragment, local/bare path | `key = require_remote_repo_key(value, "identity.tests_repo")` |
 | `validate_state`, `implied_phase` | Фаза выводится только из артефактов/executions/publications | `implied_phase(state)` |
 | `workflow_id_for`, `normalize_repo_key` | Детерминированная идентичность `wf-<16 hex>`; repo key `host/path` без `.git` | `workflow_id_for(pilot, repo_key, base_sha)` |
 | `bind_artifact`, `artifact_fresh`, `apply_revision` | Привязка digest зависимостей; T8 каскад stale | `apply_revision(state, data, reason)` |
@@ -78,7 +83,7 @@ store флаг обязателен для всех команд — автов�
 | `GitReadAdapter` | Read-only git/file identity: `file_sha256`, `git_blob`, `head_commit`, `is_dirty`, а также проверка Git-объектов и дерева коммита `object_type`, `commit_file_bytes`, `commit_file_sha256`, `commit_blob`, `changed_files` | `GitReadAdapter(repo).object_type(sha)` |
 | `snapshot_allowlist` | Детерминированный digest allowlist исходников для dirty checkout | `snapshot_allowlist(root, files)` |
 | `HarnessAdapter` | `compile_args`, `list_args`, `api_run_args`, `run_collecting_evidence` (evidence dir сохраняется до завершения pytest) | `harness.api_run_args(app_patch_sha256=...)` |
-| `TestOpsAdapter` | `plan/assign/package/upload/verify_args` + read-only `read_execution_state`, `execution_state_sha256`; execution state остаётся источником истины lifecycle | `adapter.upload_args(execution_id)` |
+| `TestOpsAdapter` | `plan/assign/package/upload/verify_args` + read-only `read_execution_state`, `execution_state_sha256` с опциональным `state_dir` для recorded external baseline; execution state остаётся источником истины lifecycle | `adapter.upload_args(execution_id)` |
 | `read_manifest`, `junit_summary`, `collected_node_ids` | Пересчёт evidence manifest/JUnit без доверия к exit code | `junit_summary(dir/"junit.xml")` |
 | `PrTransport`, `PrRef`, `PrSpec`, `spec_digest`, `pr_ref_matches` | Протокол search/create/get для PR; candidate match repo+branches+title_key | `pr_ref_matches(ref, spec)` |
 | `pr_ref_exact` | Verifiable match всего spec: полный title, immutable `head_sha`, digest тела и список файлов обязаны совпадать точно | `pr_ref_exact(ref, spec)` |
@@ -104,6 +109,25 @@ repo key строго `github.com/owner/repo`.
 | --- | --- | --- |
 | `WorkflowLock`, `IndexLock` | O_EXCL lock-файлы поверх `ExecutionLock`: один writer на workflow и на `index.json`; мёртвый pid освобождается, битый lock отклоняется | `with WorkflowLock(dir):` |
 | `load_index`, `save_index`, `register`, `find_entry`, `mark_active`, `acquire` | Журнал lineage repo+pilot → workflow; повторный init резюмит, иной base требует `--supersede` | `find_entry(index, repo_key, pilot)` |
+
+## Routing: tests remote identity и external baseline root (32A)
+
+Принятое разделение идентичности: `identity.tests_repo` — canonical
+immutable remote (`init --tests-repo`, обязателен для нового state;
+resume с другим remote блокируется до state/index writes),
+`locals.tests_repo_path` — локальный checkout для commit/dirty/tree
+gates. `workflow_id` и index key не зависят от `--tests-repo`.
+`Orchestrator._pr_repo_key(state, "tests")` возвращает записанную
+canonical identity; fallback на local path удалён, при отсутствии —
+`WorkflowBlockedError`.
+
+| Компонент | Назначение | Пример |
+| --- | --- | --- |
+| `Orchestrator.init(..., tests_repo=None)` | Флаг обязателен для нового state; mismatch на resume — controlled block; state без identity — block без backfill | `orch.init(..., tests_repo="https://github.com/L4m4w/getting-started-python")` |
+| `Orchestrator.import_execution(..., evidence_root=None)` | `--evidence-root <absolute project root>` только с `--provenance` и только accepted baseline; resolved root вне store dir; containment resolved dirs/subpaths; записывает typed `evidence_root`/`testops_state_dir`; conflict location до same-revision no-op | `orch.import_execution("run-vzsatlfk", evidence_root="/abs/HIST", provenance=accepted_record)` |
+| `Orchestrator._verify_testops_source(..., state_dir=None, base_root=None)` | Читает recorded `state_dir`; относительные `results.path`/`package.dir` резолвятся от `base_root` (default `self.root`) | внутренний helper |
+| `Orchestrator._recorded_testops_dir`, `._observe_testops`, `._reimport_recorded_execution` | Единый resolver recorded dirs для reimport/rebind/reads; observation читает recorded `testops_state_dir` | внутренние helpers |
+| External-root read-only | `prepare/publish/verify` и reconcile upload отказывают до delegated subprocess даже при `sent`/`uploaded` в state; zero writes/locks в исторический root; head-публикация от base не переписывается | контракт, не API |
 
 ## Тестовые helpers и константы
 
@@ -187,3 +211,55 @@ offline-путях; общая приёмка 21/21R/21R2 оформлена в
 Live/MVP ограничения сохраняются. Константы `test_data.consts.workflow_21r_a`,
 `workflow_21r_b` и `workflow_21r2` описаны в
 [каталоге consts](consts.md); новые regression-файлы одноимённы в tests/unit.
+
+
+## Clean-revision routing: принятый интерфейс 33R
+
+`init --tests-repo` сохраняет canonical `identity.tests_repo` отдельно от
+`locals.tests_repo_path`. Для init pure parser проверяет raw path segments
+до нормализации; `.`, `..` и пустые внутренние segments отклоняются.
+`state.remote_repo_key_parts(key)` возвращает `(owner, name)` или `None`;
+`REMOTE_REPO_HOST`, `REMOTE_REPO_SCHEMES`, `REMOTE_OWNER_RE`, `REMOTE_NAME_RE`
+определяют общий owner/repo контракт с GitHub transport. Пример:
+`require_remote_repo_key("git@github.com:Unit-Org/Unit-Repo.git", "tests_repo")`.
+Schema v1 читает legacy state без remote key, но init не выполняет backfill.
+Same-workflow remote conflict проверяется до изменения index/state:
+lock-free probe, recheck под index lock, recheck под workflow lock.
+Успешный resume штатно пишет журнал; lock/gate files не являются publication.
+Index/workflow locks не держатся во время subprocess. Требования к remote
+при изменении app base остаются частью отдельного supersede review.
+
+`Orchestrator._external_pre_manifest_problems` проверяет root/derived dirs/
+manifest до чтения JSON; `_external_containment_problems` проверяет default
+и declared paths и `_tree_member_problems` — members до содержимого.
+`_recorded_execution_dirs` вызывает `_validate_persisted_root` перед later
+reads. `_require_local_evidence` запрещает external TestOps prepare/publish/
+verify; external upload/verify intent в reconcile остаётся blocked, без
+adopt/retryable решения. Это guard against observed path drift, не атомарный
+filesystem snapshot: одновременная внешняя подмена между check/read остаётся
+ограничением. На время операций historical evidence не должен иметь writer.
+
+`TestOpsAdapter.read_execution_state(execution_id, state_dir=None)` и
+`execution_state_sha256(execution_id, state_dir=None)` читают заданную location;
+без аргумента действует local layout. Import:
+`orch.import_execution("run-vzsatlfk", provenance=accepted_record, evidence_root="/abs/HIST")`.
+Head waiver и изменение accepted baseline registry не вводятся.
+
+
+## Shape и metadata guards external evidence (34V)
+
+`infrastructure.workflow.adapters.manifest_shape_problems(manifest)` — pure
+проверка dict/list container types перед `.get`/`.items`; возвращает problems,
+не подменяет completeness/provenance/source gates. `read_manifest` переводит
+невалидную форму в WorkflowValidationError; phase2 containment использует
+тот же helper. Пример: `manifest_shape_problems({"artifacts": "invalid"})`.
+`_tree_member_problems` отвергает non-regular members до content readers;
+literal manifest/state/JUnit files также не должны быть FIFO/socket/device.
+Caller и persisted historical root запрещено размещать внутри local project
+root, даже вне store. Accepted HIST root и рабочий clean QA checkout disjoint.
+Fixtures: `workflow_historical_root.MALFORMED_MANIFEST_CONTAINERS`,
+`NON_REGULAR_RESULT_NAME`, `NESTED_ROOT_NAME`; пример параметризации:
+`@pytest.mark.parametrize("field_path, value", HR.MALFORMED_MANIFEST_CONTAINERS)`.
+Pre-existing local declared-path containment gap (34V-A F4) не расширяется
+этим external-input guard и остаётся отдельным ограничением; arbitrary local
+manifest пути не входят в разрешённый пилотный input scope.

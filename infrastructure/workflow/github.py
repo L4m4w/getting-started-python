@@ -52,7 +52,9 @@ from . import state as state_mod
 from .adapters import PrRef, PrTransport
 
 GITHUB_API_ENDPOINT = "https://api.github.com"
-GITHUB_REPO_HOST = "github.com"
+# The strict canonical remote contract lives in state.py: init
+# --tests-repo and this transport enforce one shared rule set.
+GITHUB_REPO_HOST = state_mod.REMOTE_REPO_HOST
 API_VERSION = "2026-03-10"
 ACCEPT_HEADER = "application/vnd.github+json"
 DEFAULT_TIMEOUT_S = 30
@@ -63,8 +65,8 @@ DEFAULT_TOKEN_ENV = "GITHUB_TOKEN"
 # a maximum of 3000 files" — a count above it is never provable.
 MAX_LISTED_FILES = 3000
 
-OWNER_RE = re.compile(r"[A-Za-z0-9][A-Za-z0-9-]{0,38}")
-REPO_NAME_RE = re.compile(r"[A-Za-z0-9._-]{1,100}")
+OWNER_RE = state_mod.REMOTE_OWNER_RE
+REPO_NAME_RE = state_mod.REMOTE_NAME_RE
 LINK_PAIR_RE = re.compile(r'<([^>]+)>\s*;\s*rel\s*=\s*"([^"]+)"')
 
 KNOWN_PR_STATES = ("open", "closed")
