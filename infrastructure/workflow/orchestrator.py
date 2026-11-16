@@ -46,6 +46,14 @@ DEFAULT_STRENGTH_EVIDENCE = {
 
 PR_ROLES = ("app", "tests")
 
+# The only ``blocked_reason`` ``pr verify`` may re-prove: the marker
+# ``state.apply_revision`` writes on every recorded PR entry when the
+# input revision changes. The literal is part of the recorded-state
+# contract, so it is duplicated verbatim rather than imported.
+PR_REVISION_BLOCK_REASON = (
+    "input revision changed; the PR spec and publication must "
+    "be re-verified for the new head")
+
 
 def _requirement_ids_from(path):
     ids = []
@@ -3200,6 +3208,228 @@ class Orchestrator:
             state_mod.save_state(workflow_dir, state)
             return self._dispatch_pr_create(state, workflow_dir, transport,
                                             role, spec, entry, intent)
+
+    def pr_verify(self, role, workflow_id=None, online=False):
+        """Remote read-only re-proof of the recorded PR; never dispatches.
+
+        A revision bump blocks every recorded PR entry even when the
+        remote effect still matches the new head exactly, and none of
+        the create/reconcile paths can settle it in place. ``pr verify``
+        is the supported re-confirmation: the recorded spec and number
+        are re-proven by a targeted ``get`` plus the same commit/tree,
+        body-integrity and exact-spec checks used at create time, all
+        evaluated against the CURRENT revision. Only a complete exact
+        proof restores ``verified`` and appends journal evidence bound
+        to the current revision; a proven 404, a mismatch, an
+        unreadable or inconsistent remote snapshot and every other
+        failure keep the recorded identity and stay blocked/unknown —
+        no replacement search, no create and no resend, ever.
+
+        A previously ``verified`` claim never survives a fresh check
+        that fails to re-prove it: proven negatives (404, mismatch,
+        local integrity violations of the recorded identity, head or
+        body payload) demote the entry to ``blocked``, while an
+        indeterminate targeted get demotes it to ``unknown`` — a
+        retryable status that a later ``pr verify`` may re-prove. The
+        recorded number/url/spec and the completed create intent are
+        never rewritten, and ``refresh_phase`` runs before every
+        persisted change so a ``published`` workflow drops to
+        ``executed`` when a required publication is no longer proven.
+        Permission refusals (missing ``--online``/transport) are not
+        checks: they raise without touching the entry.
+        """
+        if role not in PR_ROLES:
+            raise WorkflowValidationError(
+                f"pr repo role must be one of {PR_ROLES}")
+        workflow_id = self._resolve_workflow_id(workflow_id)
+        workflow_dir = self.workflow_dir(workflow_id)
+        with self._locked(workflow_dir, operation="pr-verify"):
+            state = state_mod.load_state(workflow_dir)
+            if state is None:
+                raise WorkflowBlockedError("no state; run init first")
+            self._require_fresh(state)
+            if state["phase"] not in ("executed", "published"):
+                raise WorkflowBlockedError(
+                    f"pr verify requires phase executed; current phase "
+                    f"is {state['phase']}")
+            entry = state["publications"]["pr"][role]
+            status = entry.get("status")
+            if status in ("pending", "intent"):
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": f"pr.{role} is {status}; there is no "
+                                  "recorded remote PR to re-verify"}
+            if status == "blocked" \
+                    and entry.get("blocked_reason") \
+                    != PR_REVISION_BLOCK_REASON:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": f"pr.{role} is blocked: "
+                                  f"{entry.get('blocked_reason')}; "
+                                  "pr verify only re-proves a "
+                                  "revision-blocked entry and never "
+                                  "bypasses other blocked reasons"}
+            problems = self._recorded_pr_identity_problems(entry)
+            if problems:
+                detail = ("recorded PR identity is incomplete or "
+                          "inconsistent: " + "; ".join(problems))
+                if self._demote_verified_pr(entry, "blocked", detail):
+                    state_mod.refresh_phase(state)
+                    state_mod.save_state(workflow_dir, state)
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": detail, "problems": problems}
+            spec = entry["spec"]
+            open_intent = self._open_pr_intent(state, role)
+            if open_intent is not None:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": f"intent {open_intent['intent_id']} is "
+                                  f"{open_intent['status']}; an "
+                                  "unresolved create blocks "
+                                  "re-verification — reconcile until "
+                                  "remote proof exists"}
+            inherited = self._blocking_inherited(state, workflow_dir,
+                                                 role)
+            if inherited:
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": f"a superseded workflow left "
+                                  f"unresolved create "
+                                  f"{inherited[0]['intent_id']} for "
+                                  f"pr.{role}; resolve it in the "
+                                  "superseded workflow first"}
+            transport = self._pr_transport(role)
+            if transport is None:
+                raise WorkflowPermissionError(
+                    "no PR transport configured for this stage; live "
+                    "transport is future authorized work")
+            if not online:
+                raise WorkflowPermissionError(
+                    "pr verify performs a read-only remote query; pass "
+                    "--online")
+            head_problems = self._commit_head_problems(
+                state, role, spec.get("head_sha"),
+                spec.get("files") or ())
+            if not spec.get("head_sha") or head_problems:
+                detail = (f"pr.{role} recorded spec fails Git "
+                          "commit/tree verification against the "
+                          "current revision: "
+                          + "; ".join(
+                              head_problems or ["head_sha is None"]))
+                if self._demote_verified_pr(entry, "blocked", detail):
+                    state_mod.refresh_phase(state)
+                    state_mod.save_state(workflow_dir, state)
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": detail, "problems": head_problems}
+            body_problems = self._body_payload_problems(workflow_dir,
+                                                        spec)
+            if body_problems:
+                detail = ("recorded PR body payload is not "
+                          "reproducible: " + "; ".join(body_problems))
+                if self._demote_verified_pr(entry, "blocked", detail):
+                    state_mod.refresh_phase(state)
+                    state_mod.save_state(workflow_dir, state)
+                return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                        "detail": detail, "problems": body_problems}
+            number = entry["number"]
+            try:
+                ref = transport.get(spec.get("repo"), number)
+            except Exception as error:
+                state_mod.record_error(
+                    state, "pr_verify", "get_error",
+                    f"targeted get of recorded PR #{number} raised "
+                    f"{type(error).__name__}: {error}")
+                self._demote_verified_pr(entry, "unknown")
+                state_mod.refresh_phase(state)
+                state_mod.save_state(workflow_dir, state)
+                return {"outcome": "unknown", "exit": EXIT_UNKNOWN,
+                        "detail": f"targeted get of recorded PR "
+                                  f"#{number} failed; the remote effect "
+                                  "is indeterminate — nothing is "
+                                  "created or resent"}
+            if ref is not None and ref.number == number \
+                    and adapters.pr_ref_exact(ref, spec):
+                entry.update(status="verified", number=ref.number,
+                             url=getattr(ref, "url", None)
+                             or entry.get("url"),
+                             blocked_reason=None)
+                state_mod.refresh_phase(state)
+                state_mod.add_journal(
+                    state, "orchestrator", "pr-verify",
+                    f"{role}: recorded PR #{ref.number} re-verified by "
+                    f"targeted get at revision "
+                    f"{state['input']['revision']}")
+                state_mod.save_state(workflow_dir, state)
+                return {"outcome": "verified", "number": ref.number,
+                        "exit": EXIT_OK}
+            if status == "verified":
+                # A fresh negative check must never leave a stale
+                # verified claim standing (repeat-verify safety).
+                entry["status"] = "blocked"
+            entry["blocked_reason"] = (
+                f"recorded PR #{number} could not be re-proven by a "
+                f"fresh targeted get ({'not found' if ref is None else 'verification failed'}); the remote identity stays "
+                "recorded and nothing is created or resent")
+            state_mod.refresh_phase(state)
+            state_mod.save_state(workflow_dir, state)
+            return {"outcome": "blocked", "exit": EXIT_BLOCKED,
+                    "detail": entry["blocked_reason"]}
+
+    @staticmethod
+    def _demote_verified_pr(entry, status, reason=None):
+        """Strip a stale ``verified`` claim after a failed re-proof.
+
+        Only the positive claim is revoked: recorded number/url/spec
+        and the completed create intent stay untouched. ``blocked``
+        marks a proven negative (the recorded effect or its local
+        evidence is provably wrong — manual resolution or a new spec
+        is required); ``unknown`` marks an indeterminate check the
+        next ``pr verify`` may re-prove. Returns True when the entry
+        actually changed; callers must ``refresh_phase`` before save
+        so a no-longer-proven publication drops ``published`` back to
+        ``executed``.
+        """
+        if entry.get("status") != "verified":
+            return False
+        entry["status"] = status
+        if reason is not None:
+            entry["blocked_reason"] = reason
+        return True
+
+    @staticmethod
+    def _recorded_pr_identity_problems(entry):
+        """Integrity of the recorded remote identity, checked locally.
+
+        Re-verification may only ever prove the effect that was
+        recorded: a usable spec that still hashes to the recorded
+        ``spec_sha256`` and a positive recorded remote number. Anything
+        missing or inconsistent fails locally — the remote is never
+        queried to decide what was recorded, and no replacement number
+        is ever adopted.
+        """
+        problems = []
+        spec = entry.get("spec")
+        if not isinstance(spec, dict):
+            problems.append("no recorded spec")
+        else:
+            if not spec.get("repo"):
+                problems.append("recorded spec misses 'repo'")
+            recorded_sha = entry.get("spec_sha256")
+            if not (isinstance(recorded_sha, str)
+                    and state_mod.HEX64.fullmatch(recorded_sha)):
+                problems.append("recorded spec_sha256 missing or not "
+                                "64-hex")
+            else:
+                inner = spec.get("spec_sha256")
+                if inner is not None and inner != recorded_sha:
+                    problems.append("spec.spec_sha256 does not equal "
+                                    "recorded spec_sha256")
+                payload = {key: value for key, value in spec.items()
+                           if key != "spec_sha256"}
+                if adapters.spec_digest(payload) != recorded_sha:
+                    problems.append("recorded spec content does not "
+                                    "hash to spec_sha256")
+        number = entry.get("number")
+        if not isinstance(number, int) or isinstance(number, bool) \
+                or number <= 0:
+            problems.append("no recorded positive remote PR number")
+        return problems
 
     def _open_pr_intent(self, state, role):
         for intent in state.get("intents") or []:

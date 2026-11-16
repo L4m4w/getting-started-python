@@ -48,7 +48,7 @@ def _sha256_hex(value):
 
 
 _PR_TRANSPORT_ACTIONS = frozenset({"reconcile", "resume"})
-_PR_DISPATCHING_PR_ACTIONS = frozenset({"create", "search"})
+_PR_TRANSPORT_PR_ACTIONS = frozenset({"create", "search", "verify"})
 
 
 def _needs_pr_transport(options):
@@ -57,12 +57,13 @@ def _needs_pr_transport(options):
     status/init/doctor/prepare and every other action keep no transports
     even when --pr-transport github is passed: selecting a transport is
     not an authorization, and no credential or HTTP access may happen on
-    paths that never reach a transport call.
+    paths that never reach a transport call. ``pr verify`` reaches only
+    a read-only targeted ``get`` — never ``create``.
     """
     if options.action in _PR_TRANSPORT_ACTIONS:
         return True
     return (options.action == "pr"
-            and options.pr_action in _PR_DISPATCHING_PR_ACTIONS)
+            and options.pr_action in _PR_TRANSPORT_PR_ACTIONS)
 
 
 def _orchestrator(options):
@@ -252,6 +253,12 @@ def cmd_pr(options, parser):
             online=options.online)
         _print(result)
         return _exit_of(result)
+    if options.pr_action == "verify":
+        result = orchestrator.pr_verify(
+            options.repo, workflow_id=options.workflow_id,
+            online=options.online)
+        _print(result)
+        return _exit_of(result)
     return 0
 
 
@@ -357,7 +364,7 @@ def main():
     actions.add_parser("doctor")
     pr = actions.add_parser("pr")
     pr_actions = pr.add_subparsers(dest="pr_action", required=True)
-    for name in ("prepare", "create", "search"):
+    for name in ("prepare", "create", "search", "verify"):
         sub = pr_actions.add_parser(name)
         sub.add_argument("--repo", required=True, choices=orch.PR_ROLES)
         sub.add_argument("--online", action="store_true")

@@ -30,7 +30,7 @@ workflow — read-only evidence, не вход для новых прогоно�
 | Компонент | Путь / вызов | Назначение | Пример |
 | --- | --- | --- | --- |
 | Workflow CLI | `tools/run-workflow.sh` → `tools/workflow.py` | init/status/accept/check/run-execution/import-execution/prepare-testops/publish-testops/verify-testops/reconcile/resume/doctor/pr; коды 0/2/69/75/77/127/130; глобальный `--pr-transport {none,github}` | `sh tools/run-workflow.sh status` |
-| `Orchestrator` | `infrastructure.workflow.orchestrator.Orchestrator` | Переходный автомат; `runner`, `git_adapter`, `tests_git_adapter`, `source_contract`, `scenario_contract` и `accepted_provenance` инъецируются только в тестах (боевой CLI использует пилотные контракты); `pr_transports` CLI подключает только при `--pr-transport github` и только на dispatch-командах (`pr create`, `pr search`, `reconcile`, `resume`) — lazy import + чистый конструктор без I/O, один объект в роли `app` и `tests` | `Orchestrator(root).init(pilot_id=..., ...)` |
+| `Orchestrator` | `infrastructure.workflow.orchestrator.Orchestrator` | Переходный автомат; `runner`, `git_adapter`, `tests_git_adapter`, `source_contract`, `scenario_contract` и `accepted_provenance` инъецируются только в тестах (боевой CLI использует пилотные контракты); `pr_transports` CLI подключает только при `--pr-transport github` и только на командах, достигающих transport-вызова (`pr create`, `pr search`, `pr verify`, `reconcile`, `resume`) — lazy import + чистый конструктор без I/O, один объект в роли `app` и `tests` | `Orchestrator(root).init(pilot_id=..., ...)` |
 
 Глобальные `--store-dir`/`--workflow-id`/`--pr-transport` идут до
 subcommand (см. [runbook](../integrations/qa-workflow.md)): при >1
@@ -211,6 +211,42 @@ offline-путях; общая приёмка 21/21R/21R2 оформлена в
 Live/MVP ограничения сохраняются. Константы `test_data.consts.workflow_21r_a`,
 `workflow_21r_b` и `workflow_21r2` описаны в
 [каталоге consts](consts.md); новые regression-файлы одноимённы в tests/unit.
+
+
+## pr verify: read-only re-proof записанного PR (39C/40)
+
+`Orchestrator.pr_verify(role, workflow_id=None, online=False)` —
+remote READ-ONLY подтверждение записанного remote-эффекта на месте.
+Revision bump помечает записанную публикацию `blocked` маркером
+`PR_REVISION_BLOCK_REASON` (дублирует литерал `state.apply_revision`:
+часть recorded-state контракта), и `pr verify` — единственный
+поддерживаемый путь вернуть `verified` без смены spec.
+
+Gate'ы до любого remote-вызова: freshness, phase `executed`/`published`,
+`_recorded_pr_identity_problems` (положительный `number`, spec, чей
+канонический digest совпадает с записанным `spec_sha256`), отсутствие
+unresolved own/inherited `pr.create` intents; прочие причины `blocked`
+не обходятся. Далее targeted `get(spec.repo, entry.number)` +
+`_commit_head_problems(..., require_current_revision=True)` +
+`_body_payload_problems` + `pr_ref_exact` и совпадение номера.
+Полное доказательство → `verified` + journal `pr-verify` текущей
+ревизии; доказанный 404/mismatch/неполный snapshot → `blocked`
+(`verified` деградирует — ложного claim после свежей отрицательной
+проверки нет); get exception → `unknown` (75): `verified`-запись
+деградирует в `unknown` (статус допускает повторный verify после
+восстановления remote), а `blocked`/`created`/`unknown` записи
+сохраняют статус и причину. Локальные нарушения целостности записанной
+evidence на `verified`-записи — `_recorded_pr_identity_problems`,
+`_commit_head_problems`, `_body_payload_problems` — деградируют её в
+`blocked` с причиной находки ещё до remote-вызова. При любой смене
+статуса перед save выполняется `refresh_phase`: `published` без
+подтверждённой обязательной публикации опускается до `executed`.
+Отказ permission (нет `--online`/transport) — не проверка и `verified`
+не трогает.
+`transport.create`/`search` не вызываются никогда; number/url/spec и
+completed create-intent сохраняются без переписывания.
+CLI: `pr verify --repo {app,tests} --online`. Регрессии:
+`tests/unit/test_workflow_pr_verify.py`.
 
 
 ## Clean-revision routing: принятый интерфейс 33R

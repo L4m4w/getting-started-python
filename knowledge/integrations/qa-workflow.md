@@ -44,7 +44,8 @@ sh tools/run-workflow.sh --store-dir artifacts/workflow \
   лениво подключает принятый stdlib GitHub REST transport
   (`infrastructure.workflow.github.GitHubPrTransport`) в обе PR-роли
   (`app`, `tests`) и только на командах, способных дойти до
-  transport-вызова (`pr create`, `pr search`, `reconcile`, `resume`):
+  transport-вызова (`pr create`, `pr search`, `pr verify`,
+  `reconcile`, `resume`):
   на `status`/`init`/`doctor`/`pr prepare` модуль даже не импортируется.
   Выбор транспорта сам по себе сеть не разрешает — HTTP выполняется
   только при `--online`, а POST — только при `--execute` + `--online` +
@@ -304,6 +305,7 @@ sh tools/run-workflow.sh pr prepare --repo app --title "..." \
 sh tools/run-workflow.sh --pr-transport github pr search --repo app --online
 sh tools/run-workflow.sh --pr-transport github pr create --repo app \
   --execute --online
+sh tools/run-workflow.sh --pr-transport github pr verify --repo app --online
 ```
 
 `spec.repo` роли `tests` — canonical `identity.tests_repo` из init
@@ -337,6 +339,33 @@ files → повторный detail` (второй read обязан совпа�
 - при unknown-диспатче `pr.create` пустой поиск никогда не переводит
   intent в retry-safe: intent со снимком spec остаётся unresolved и
   блокирует re-prepare/create в текущей и superseded линиях.
+
+`pr verify --repo {app,tests} --online` — remote READ-ONLY
+re-verification записанного PR на месте (39C/40): после revision bump
+записанная публикация становится `blocked` с ревизионным маркером, и
+ни `reconcile`, ни `pr create`, ни `pr prepare` не могут подтвердить
+существующий remote-эффект без смены spec или ручной правки state.
+`pr verify` проверяет freshness, текущую ревизию и фазу `executed`,
+целостность записанной identity (`number`, `url`, `spec`/`spec_sha256`),
+отсутствие unresolved own/inherited `pr.create` intents (единственная
+допустимая причина `blocked` — ревизионный маркер) и только затем делает
+единственный внешний вызов — targeted `get` по записанному номеру с
+теми же commit/tree + body-integrity + exact-spec проверками против
+текущей ревизии, что и при create. Полное совпадение → `verified` и
+journal `pr-verify` текущей ревизии; доказанный 404, mismatch или
+неполный snapshot → `blocked` (ложного `verified` после свежей
+отрицательной проверки не остаётся); ошибка `get` → `unknown` (75):
+`verified`-запись деградирует в `unknown`, а не остаётся подтверждённой,
+и повторный verify может её редоказать. Нарушение локальной
+целостности recorded identity/head/body на `verified`-записи снимает
+claim до remote-вызова (`blocked` с причиной находки). При смене
+статуса `refresh_phase` выполняется до сохранения: `published`
+опускается до `executed`, когда обязательная публикация больше не
+подтверждена. Отказ без `--online` или transport — не результат
+проверки и записанное состояние не меняет.
+`transport.create` и `search` не вызываются никогда — подменный номер
+после 404 не ищется, resend невозможен; повторный verify выполняет
+свежий targeted get.
 
 ## Восстановление
 
